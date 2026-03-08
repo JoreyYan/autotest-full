@@ -19,11 +19,9 @@ export default function App() {
             <header className="border-b bg-card/80 backdrop-blur">
               <div className="max-w-6xl mx-auto px-6 py-4 flex flex-wrap items-center gap-4 justify-between">
                 <div className="flex items-center gap-3">
-                  <div className="w-10 h-10 rounded-lg bg-primary text-primary-foreground flex items-center justify-center font-semibold mono">
-                    AT
-                  </div>
+                  <img src="/logo.png" alt="smarton logo" className="w-10 h-10 rounded-lg object-cover" />
                   <div>
-                    <div className="text-lg font-semibold text-foreground">变压器自动测试系统</div>
+                    <div className="text-lg font-semibold text-foreground">smarton 测试系统</div>
                     <div className="text-xs text-muted-foreground">现场测试与产品配置一体化工作台</div>
                   </div>
                 </div>
@@ -44,14 +42,6 @@ export default function App() {
                     }
                   >
                     管理
-                  </NavLink>
-                  <NavLink
-                    to="/test-preview"
-                    className={({ isActive }) =>
-                      `px-4 py-2 rounded-full border transition ${isActive ? "bg-primary text-primary-foreground border-primary" : "bg-card text-muted-foreground hover:text-foreground"}`
-                    }
-                  >
-                    预览
                   </NavLink>
                 </nav>
               </div>
