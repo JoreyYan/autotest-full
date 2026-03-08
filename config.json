@@ -1,0 +1,6 @@
+{
+  "port": "COM4",
+  "baudrate": 115200,
+  "products_dir": "products",
+  "results_dir": "results"
+}
