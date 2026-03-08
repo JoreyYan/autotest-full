@@ -16,3 +16,9 @@ results/
 .vscode/
 .DS_Store
 Thumbs.db
+
+# Local git repos/backups
+**/.git.frontend-backup/
+_tmp_follow_me2/
+frontend_backup_20260308_155355/
+frontend_backup_20260308_155411/
