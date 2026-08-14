@@ -46,9 +46,28 @@ class UCEInstrument(BaseInstrument):
         return text.lstrip("!")
 
     def run_test(self) -> tuple[bool, str]:
-        if not self.trigger():
+        # 两种固件行为：
+        #   旧固件：先回单独确认字节 "!"，约 1.7s 后另发一包 CSV
+        #   新固件（如 Ver 1.0.0/T5-526-10756）：一次性回 "!" + CSV + 0x9F 结束标记
+        self._conn.clear()
+        self._conn.send("*TRG")
+        first = self._conn.recv(timeout=3.0)
+        if not first or not first.startswith(b"!"):
             return False, "__NO_ACK__"
-        csv = self.recv_csv(timeout=10.0)
-        if not csv:
+        raw = first[1:]
+        if not raw.strip(b"\x9f\r\n \t"):
+            # 首包只有确认字节（旧固件路径）：CSV 在后续包
+            csv = self.recv_csv(timeout=10.0)
+            if not csv:
+                return False, "__NO_CSV__"
+            return True, csv
+        # 首包已带数据（新固件路径）：0x9F 尾标记未到就继续收
+        while not raw.rstrip(b"\r\n \t").endswith(b"\x9f"):
+            more = self._conn.recv(timeout=10.0)
+            if not more:
+                break
+            raw += more
+        text = raw.strip(b"\x9f\r\n \t").decode("ascii", errors="replace").strip()
+        if not text:
             return False, "__NO_CSV__"
-        return True, csv
+        return True, text

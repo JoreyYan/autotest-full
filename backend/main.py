@@ -18,7 +18,7 @@ from .csv_writer import save
 from .inspection_csv_writer import save as save_inspection
 from .feishu_uploader import get_uploader
 
-APP_VERSION = '1.4.0'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
+APP_VERSION = '1.4.1'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
 
 app = FastAPI(title='变压器测试系统', version=APP_VERSION)
 
@@ -376,16 +376,21 @@ def _do_sync_params() -> dict:
         code = item['product_code']
         remote_codes.add(code)
         ver = item['version']
+        upd = item.get('updated_at', 0)
         cfg = item['config']
         local_path = products_dir / f'{code}.json'
-        local_ver = 0
+        local_ver, local_upd = 0, 0
         if local_path.exists():
             try:
-                local_ver = int(json.loads(local_path.read_text(encoding='utf-8')).get('_version', 0))
+                local_data = json.loads(local_path.read_text(encoding='utf-8'))
+                local_ver = int(local_data.get('_version', 0))
+                local_upd = int(local_data.get('_updated_at', 0))
             except Exception:
-                local_ver = 0
-        if ver > local_ver:
+                local_ver, local_upd = 0, 0
+        # 远端为准：版本或更新时间任一变化就覆盖（兼容撤回后重新下发版本回到 v1 的情况）
+        if ver != local_ver or upd != local_upd:
             cfg['_version'] = ver
+            cfg['_updated_at'] = upd
             local_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding='utf-8')
             updated.append({'product_code': code, 'version': ver})
 
