@@ -220,12 +220,35 @@ class FeishuUploader:
                 return
             log(f"飞书添加字段失败 {field_def.get('field_name')}: {e}", 'WARN')
 
+    def _ensure_common_fields(self, table_id: str):
+        """老表可能缺后来新增的公共列（如 公司/产线/工段）。
+        每会话每表只核对一次，缺的补上，避免 FieldNameNotFound 拒收。"""
+        checked = getattr(self, '_common_fields_checked', None)
+        if checked is None:
+            checked = self._common_fields_checked = set()
+        if table_id in checked:
+            return
+        try:
+            existing = self._list_existing_field_names(table_id)
+            for f in COMMON_PREFIX_FIELDS:
+                if f['field_name'] not in existing:
+                    self._add_field(table_id, f)
+                    log(f"老表补公共列: {f['field_name']} -> {table_id}")
+            for f in COMMON_SUFFIX_FIELDS:
+                if f['field_name'] not in existing:
+                    self._add_field(table_id, f)
+                    log(f"老表补公共列: {f['field_name']} -> {table_id}")
+            checked.add(table_id)
+        except Exception as e:
+            log(f'核对公共列失败(不阻断): {e}', 'WARN')
+
     def _ensure_table(self, product_code: str, item_labels: list[str]) -> str:
         """返回 table_id；不存在则建表 + 加字段；存在但缺字段则补字段。"""
         mapping = self._load_mapping()
         entry = mapping.get(product_code)
         if entry and entry.get('table_id'):
             table_id = entry['table_id']
+            self._ensure_common_fields(table_id)
             known = set(entry.get('item_labels', []))
             new_labels = [lab for lab in item_labels if lab not in known]
             if new_labels:
