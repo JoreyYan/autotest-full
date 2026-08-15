@@ -18,7 +18,7 @@ from .csv_writer import save
 from .inspection_csv_writer import save as save_inspection
 from .feishu_uploader import get_uploader
 
-APP_VERSION = '1.5.1'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
+APP_VERSION = '1.5.2'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
 
 app = FastAPI(title='变压器测试系统', version=APP_VERSION)
 
@@ -806,6 +806,18 @@ def _find_frontend_dist() -> Path | None:
 frontend_dist = _find_frontend_dist()
 if frontend_dist:
     app.mount('/', StaticFiles(directory=str(frontend_dist), html=True), name='frontend')
+
+    # SPA 路由回退：直接访问 /admin、/test-preview 等前端路由时返回 index.html
+    from fastapi.responses import FileResponse, JSONResponse
+    from starlette.exceptions import HTTPException as StarletteHTTPException
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _spa_fallback(request, exc):
+        if exc.status_code == 404 and not request.url.path.startswith('/api'):
+            index = frontend_dist / 'index.html'
+            if index.exists():
+                return FileResponse(index)
+        return JSONResponse({'detail': exc.detail}, status_code=exc.status_code)
 
 
 # ── 启动入口 ─────────────────────────────────────────────────────

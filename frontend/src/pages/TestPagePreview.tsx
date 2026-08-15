@@ -1,328 +1,131 @@
-﻿import { useEffect, useMemo, useState } from "react";
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { api, type LogItem, type MeasuredItem, type TestResult } from "@/lib/api";
+import { useState } from "react";
+import { type MeasuredItem, type TestResult } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Progress } from "@/components/ui/progress";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { Separator } from "@/components/ui/separator";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Switch } from "@/components/ui/switch";
+import { GapCalcPanel } from "./TestPage";
 
-function limitText(value: number | null | undefined, unit: string | null | undefined): string {
-  if (value === null || value === undefined) return "-";
-  return unit ? `${value} ${unit}` : `${value}`;
+/** 演示页（/test-preview）：不连仪器，用一份模拟的磁芯检 FAIL 数据渲染
+ *  「测试结果 + 字号调节 + 气隙研磨计算」，供无设备时查看界面效果。 */
+
+function mk(type: string, pins: string, vd: number, lo: number | null, hi: number | null, result: string, unit: string | null): MeasuredItem {
+  return { type, pins, value: vd, lo: lo ?? 0, hi: hi ?? 0, result, unit, value_display: vd, lo_display: lo, hi_display: hi };
 }
 
-function normalizeUnit(unit: string): string {
-  return unit.replace("μ", "u").replace("渭", "u").replace("惟", "Ohm");
-}
+const MOCK_ITEMS: MeasuredItem[] = [
+  mk("Turn", "2-3", 1.0, 1, 1, "Pass", null),
+  mk("Turn", "6-5", 0.722865, 0.657, 0.803, "Pass", null),
+  mk("Lx", "2-3", 62.95, 63.448, 69.0375, "Fail", "uH"),
+  mk("Lx", "6-5", 38.9, 39.082, 42.525, "Fail", "uH"),
+  mk("Q", "2-3", 81.8267, 1, null, "Pass", null),
+  mk("Q", "6-5", 235.824, 1, null, "Pass", null),
+  mk("Lk", "2-3", 8.96, 8.573, 9.3282, "Pass", "uH"),
+  mk("Lk", "6-5", 5.6, 5.281, 5.74665, "Pass", "uH"),
+  mk("Cx", "2-6", 2.2397, 1.87, 2.53, "Pass", "nF"),
+  mk("Cx", "3-5", 2.24, 1.87, 2.53, "Pass", "nF"),
+  mk("Dcr", "2-3", 18.146, null, 24.5, "Pass", "mOhm"),
+  mk("Dcr", "6-5", 11.497, null, 16.5, "Pass", "mOhm"),
+  mk("EqN", "-", 1.185775, 1.14, 1.23, "Pass", null),
+];
 
-function convertSiToUnit(value: number, unit?: string | null): number {
-  if (!unit) return value;
-  const u = normalizeUnit(unit);
-  if (u === "H") return value;
-  if (u === "mH") return value * 1e3;
-  if (u === "uH") return value * 1e6;
-  if (u === "nH") return value * 1e9;
-  if (u === "F") return value;
-  if (u === "mF") return value * 1e3;
-  if (u === "uF") return value * 1e6;
-  if (u === "nF") return value * 1e9;
-  if (u === "pF") return value * 1e12;
-  if (u === "Ohm") return value;
-  if (u === "mOhm") return value * 1e3;
-  if (u === "kOhm") return value / 1e3;
-  return value;
-}
+const MOCK_RESULT: TestResult = {
+  ok: true,
+  timestamp: "2026-08-14 18:30:00",
+  product_code: "ZZ-H2500011-磁芯检",
+  serial_code: "DEMO-0001",
+  overall: "FAIL",
+  passed: 11,
+  failed: 2,
+  items: MOCK_ITEMS,
+  csv_file: "demo.csv",
+};
 
-function formatDisplayValue(item: MeasuredItem, unit?: string | null): string {
-  if (item.error) return `ERR(${item.error})`;
-  const u = item.unit ?? unit ?? null;
-  const hasDisplay = typeof item.value_display === "number" && !Number.isNaN(item.value_display);
-  if (!hasDisplay && (typeof item.value !== "number" || Number.isNaN(item.value))) return "ERR";
-  const converted = hasDisplay ? item.value_display as number : convertSiToUnit(item.value, u);
-  if (item.type === "Turn" || item.type === "Q" || !u) return Number(converted.toFixed(6)).toString();
-  return `${Number(converted.toFixed(6)).toString()} ${normalizeUnit(u)}`;
-}
-
-const TYPE_ORDER = ["Turn", "Lx", "Q", "Lk", "Cx", "Dcr"];
-
-function typeLabel(type: string): string {
-  return type === "EqN" ? "等效n" : type;
-}
-
-type UiStage = "idle" | "initializing" | "testing" | "done";
-
-function getConnState(ready: boolean, hasPort: boolean) {
-  if (ready) return { dot: "bg-emerald-500", text: "就绪" };
-  if (hasPort) return { dot: "bg-amber-500", text: "已连接未就绪" };
-  return { dot: "bg-red-500", text: "未连接" };
-}
+const TYPE_ORDER = ["Turn", "Lx", "Q", "Lk", "Cx", "Dcr", "EqN"];
+const typeLabel = (t: string) => (t === "EqN" ? "等效n" : t);
 
 export default function TestPagePreview() {
-  const [selectedProduct, setSelectedProduct] = useState("");
-  const [lastResult, setLastResult] = useState<TestResult | null>(null);
-  const [stage, setStage] = useState<UiStage>("idle");
-  const [logs, setLogs] = useState<LogItem[]>([]);
-  const [cursor, setCursor] = useState(0);
-  const [showLimits, setShowLimits] = useState(false);
+  const [showLimits, setShowLimits] = useState(true);
+  const [fontScale, setFontScale] = useState<"md" | "lg" | "xl">("md");
 
-  const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.getProducts });
-  const { data: status, refetch: refetchStatus } = useQuery({
-    queryKey: ["status"],
-    queryFn: api.getStatus,
-    refetchInterval: 2000,
-  });
-  const { data: results = [] } = useQuery({
-    queryKey: ["results"],
-    queryFn: api.getResults,
-    refetchInterval: 10000,
-  });
-  const { data: productDetail } = useQuery({
-    queryKey: ["product-detail", selectedProduct],
-    queryFn: () => api.getProduct(selectedProduct),
-    enabled: Boolean(selectedProduct),
-  });
-
-  const logsQuery = useQuery({
-    queryKey: ["logs-preview", cursor],
-    queryFn: () => api.getLogs(cursor),
-    refetchInterval: 1000,
-  });
-
-  useEffect(() => {
-    const data = logsQuery.data;
-    if (!data) return;
-    if (data.last_id < cursor) {
-      setCursor(0);
-      setLogs([]);
-      return;
-    }
-    if (data.items.length > 0) {
-      setLogs((prev) => [...prev, ...data.items].slice(-300));
-    }
-    setCursor(data.last_id);
-  }, [logsQuery.data, cursor]);
-
-  const initMutation = useMutation({
-    mutationFn: () => api.initialize(selectedProduct),
-    onMutate: () => {
-      setStage("initializing");
-      setLogs([]);
-      setCursor(0);
-    },
-    onSuccess: () => {
-      setStage("idle");
-      refetchStatus();
-    },
-    onError: () => setStage("idle"),
-  });
-
-  const testMutation = useMutation({
-    mutationFn: api.runTest,
-    onMutate: () => setStage("testing"),
-    onSuccess: (data) => {
-      setLastResult(data);
-      setStage("done");
-    },
-    onError: () => setStage("idle"),
-  });
-
-  const disconnectMutation = useMutation({
-    mutationFn: api.disconnect,
-    onSuccess: () => {
-      refetchStatus();
-      setStage("idle");
-    },
-  });
-
-  const hasPort = Boolean(status?.port);
-  const conn = getConnState(Boolean(status?.ready), hasPort);
-  const selectedName = useMemo(() => products.find((p) => p.product_code === selectedProduct)?.product_name, [products, selectedProduct]);
-  const canRun = Boolean(status?.ready && status?.product_code === selectedProduct);
-  const latestLog = logs.length > 0 ? logs[logs.length - 1].message : "暂无过程";
-  const matrixTypes = useMemo(() => {
-    if (!lastResult) return TYPE_ORDER;
-    const existing = new Set(lastResult.items.map((x) => x.type));
-    const ordered = TYPE_ORDER.filter((t) => existing.has(t));
-    const extra = Array.from(existing).filter((t) => !TYPE_ORDER.includes(t));
-    return [...ordered, ...extra];
-  }, [lastResult]);
-
-  const matrixRows = useMemo(() => {
-    if (!lastResult) return [] as string[];
-    const set = new Set(lastResult.items.map((x) => x.pins));
-    return Array.from(set);
-  }, [lastResult]);
-
-  const matrix = useMemo(() => {
-    const m = new Map<string, MeasuredItem>();
-    if (!lastResult) return m;
-    for (const item of lastResult.items) {
-      m.set(`${item.pins}::${item.type}`, item);
-    }
-    return m;
-  }, [lastResult]);
-
-  const overall = useMemo(() => {
-    if (!lastResult) return "-";
-    return lastResult.items.some((x) => x.result !== "Pass") ? "FAIL" : "PASS";
-  }, [lastResult]);
-
-  const typeUnits = useMemo(() => {
-    const m = new Map<string, string | null>();
-    const items = productDetail?.test_items ?? [];
-    for (const t of matrixTypes) {
-      const found = items.find((x) => x.test_type === t && x.unit);
-      m.set(t, found?.unit ?? null);
-    }
-    return m;
-  }, [productDetail, matrixTypes]);
+  const types = TYPE_ORDER.filter((t) => MOCK_ITEMS.some((x) => x.type === t));
+  const pinsList = Array.from(new Set(MOCK_ITEMS.map((x) => x.pins)));
+  const matrix = new Map(MOCK_ITEMS.map((x) => [`${x.pins}::${x.type}`, x]));
+  const unitOf: Record<string, string> = { Lx: "uH", Lk: "uH", Cx: "nF", Dcr: "mOhm" };
 
   return (
-    <div className="space-y-6">
-      <Card className="panel">
-        <CardContent className="pt-6 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <span className={`inline-block h-2.5 w-2.5 rounded-full ${conn.dot}`} />
-              <span className="text-sm font-medium">连接状态：{conn.text}{hasPort ? ` · ${status?.port}` : ""}</span>
-              <Badge variant="secondary">预览页</Badge>
-            </div>
-            <div className="text-sm text-muted-foreground">当前产品：{selectedProduct || "未选择"}{selectedName ? ` - ${selectedName}` : ""}</div>
-          </div>
-
-          <div className="grid gap-3 md:grid-cols-[1fr_auto] items-end">
-            <div>
-              <label className="text-sm font-medium mb-2 block">选择产品</label>
-              <Select value={selectedProduct} onValueChange={setSelectedProduct}>
-                <SelectTrigger className="h-11">
-                  <SelectValue placeholder="请选择产品..." />
-                </SelectTrigger>
-                <SelectContent>
-                  {products.map((p) => (
-                    <SelectItem key={p.product_code} value={p.product_code}>{p.product_code} - {p.product_name}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            <div className="flex gap-2">
-              <Button className="h-11" onClick={() => initMutation.mutate()} disabled={!selectedProduct || initMutation.isPending || testMutation.isPending}>初始化连接</Button>
-              <Button className="h-11" onClick={() => testMutation.mutate()} disabled={!canRun || testMutation.isPending || initMutation.isPending}>开始测试</Button>
-              <Button className="h-11" variant="outline" onClick={() => disconnectMutation.mutate()} disabled={disconnectMutation.isPending}>断开</Button>
-            </div>
-          </div>
-
-          <div className="rounded-lg border p-3 bg-slate-50">
-            <div className="text-sm font-medium">运行阶段：{stage === "idle" ? "待机" : stage === "initializing" ? "初始化中" : stage === "testing" ? "测试中" : "完成"}</div>
-            <div className="text-xs text-muted-foreground mt-1">{latestLog}</div>
-            <Progress className="mt-2" value={stage === "idle" ? 0 : stage === "initializing" ? 35 : stage === "testing" ? 70 : 100} />
-          </div>
-
-          {initMutation.data && (
-            <div className={`rounded-lg border p-3 text-sm ${initMutation.data.ok ? "bg-emerald-50 border-emerald-200 text-emerald-700" : "bg-rose-50 border-rose-200 text-rose-700"}`}>
-              {initMutation.data.message}
-            </div>
-          )}
-          {initMutation.error && <div className="rounded-lg border p-3 text-sm bg-rose-50 border-rose-200 text-rose-700">{(initMutation.error as Error).message}</div>}
-        </CardContent>
-      </Card>
+    <div className="space-y-4">
+      <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-sm text-blue-700">
+        <b>演示页</b> · 模拟数据（Lx 两项故意设为 Fail），仅用于查看界面效果；正式测试请回「测试」页。
+      </div>
 
       <Card className="panel">
         <CardHeader>
           <CardTitle className="flex items-center gap-3">
             测试结果
-            {lastResult && <Badge variant={overall === "PASS" ? "default" : "destructive"}>{overall}</Badge>}
-            {lastResult && <span className="text-xs text-muted-foreground">{lastResult.passed}/{lastResult.passed + lastResult.failed} 项通过 · {lastResult.timestamp}</span>}
+            <Badge variant="destructive">FAIL</Badge>
+            <span className="text-xs text-muted-foreground font-normal">11/13 项通过 · {MOCK_RESULT.timestamp}</span>
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          {!lastResult ? (
-            <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">完成一次测试后在这里显示完整结果。</div>
-          ) : (
-            <>
-              <div className="rounded-lg border p-3 text-sm bg-card">
-                <div className="font-medium">总判定：{overall}</div>
-                <div className="text-xs text-muted-foreground mt-1">规则：任一单元格 Fail，即总结果 Fail。</div>
-              </div>
-              <div className="flex items-center gap-2">
-                <Switch checked={showLimits} onCheckedChange={setShowLimits} />
-                <span className="text-sm text-muted-foreground">显示限值（Fail 项始终显示）</span>
-              </div>
-              <div>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="w-28">引脚</TableHead>
-                      {matrixTypes.map((t) => (
-                        <TableHead key={t} className="text-center">
-                          {typeLabel(t)}
-                          {typeUnits.get(t) ? ` (${normalizeUnit(typeUnits.get(t) as string)})` : ""}
-                        </TableHead>
-                      ))}
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {matrixRows.map((pins) => (
-                      <TableRow key={pins}>
-                        <TableCell className="mono font-semibold">{pins}</TableCell>
-                        {matrixTypes.map((type) => {
-                          const cell = matrix.get(`${pins}::${type}`);
-                          if (!cell) return <TableCell key={`${pins}-${type}`} className="text-center text-muted-foreground">-</TableCell>;
-                          const fail = cell.result !== "Pass";
-                          const cfg = (productDetail?.test_items ?? []).find((x) => x.pins === pins && x.test_type === type);
-                          const lowText = limitText(cfg?.lower_limit ?? null, cfg?.unit ?? null);
-                          const highText = limitText(cfg?.upper_limit ?? null, cfg?.unit ?? null);
-                          return (
-                            <TableCell
-                              key={`${pins}-${type}`}
-                              className={`text-center mono ${fail ? "bg-rose-50 text-rose-700 font-semibold" : "text-foreground"}`}
-                              title={cell.result}
-                            >
-                              <div>{formatDisplayValue(cell, cfg?.unit ?? null)}</div>
-                              {(showLimits || fail) && (
-                                <div className="text-[10px] font-normal leading-4 text-muted-foreground">
-                                  {lowText} ~ {highText}
-                                </div>
-                              )}
-                            </TableCell>
-                          );
-                        })}
-                      </TableRow>
-                    ))}
-                  </TableBody>
-                </Table>
-              </div>
-            </>
-          )}
+          <div className="rounded-lg border p-3 text-sm bg-rose-50 border-rose-200">
+            <div className={`font-bold ${fontScale === "xl" ? "text-4xl" : fontScale === "lg" ? "text-2xl" : "text-lg"} text-rose-700`}>总判定：FAIL</div>
+            <div className="text-xs text-muted-foreground mt-1">规则：任一单元格 Fail，即总结果 Fail。</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Switch checked={showLimits} onCheckedChange={setShowLimits} />
+            <span className="text-sm text-muted-foreground">显示限值（Fail 项始终显示）</span>
+            <div className="ml-auto flex items-center gap-1">
+              <span className="text-xs text-muted-foreground mr-1">字号</span>
+              {(["md", "lg", "xl"] as const).map((v) => (
+                <Button key={v} size="sm" variant={fontScale === v ? "default" : "outline"} className="h-7 px-2.5 text-xs" onClick={() => setFontScale(v)}>
+                  {v === "md" ? "标准" : v === "lg" ? "大" : "特大"}
+                </Button>
+              ))}
+            </div>
+          </div>
+          <div className={fontScale === "xl" ? "[&_td]:text-3xl [&_td]:py-4 [&_th]:text-xl" : fontScale === "lg" ? "[&_td]:text-xl [&_td]:py-3 [&_th]:text-base" : ""}>
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-28">引脚</TableHead>
+                  {types.map((t) => (
+                    <TableHead key={t} className="text-center">
+                      {typeLabel(t)}
+                      {unitOf[t] ? ` (${unitOf[t]})` : ""}
+                    </TableHead>
+                  ))}
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {pinsList.map((pins) => (
+                  <TableRow key={pins}>
+                    <TableCell className="mono font-semibold">{pins}</TableCell>
+                    {types.map((type) => {
+                      const cell = matrix.get(`${pins}::${type}`);
+                      if (!cell) return <TableCell key={`${pins}-${type}`} className="text-center text-muted-foreground">-</TableCell>;
+                      const fail = cell.result !== "Pass";
+                      return (
+                        <TableCell key={`${pins}-${type}`} className={`text-center mono ${fail ? "bg-rose-50 text-rose-700 font-semibold" : "text-foreground"}`}>
+                          <div>{cell.value_display}</div>
+                          {(showLimits || fail) && (
+                            <div className="text-[0.55em] font-normal leading-snug text-muted-foreground">
+                              {cell.lo_display ?? "-"} ~ {cell.hi_display ?? "-"}
+                            </div>
+                          )}
+                        </TableCell>
+                      );
+                    })}
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
         </CardContent>
       </Card>
 
-      <details className="panel rounded-lg border">
-        <summary className="cursor-pointer px-4 py-3 text-sm font-medium">日志与历史（次要信息，默认折叠）</summary>
-        <div className="px-4 pb-4 space-y-4">
-          <div className="rounded-lg border bg-slate-950 text-slate-100 p-3 h-[220px] overflow-auto text-xs mono">
-            {logs.length === 0 ? <div className="text-slate-400">暂无日志</div> : null}
-            {logs.map((entry) => (
-              <div key={entry.id} className="leading-5">[{entry.ts}] {entry.message}</div>
-            ))}
-          </div>
-
-          <div className="grid gap-3 md:grid-cols-2">
-            {results.slice(0, 6).map((r) => (
-              <div key={r.filename} className="rounded-lg border p-3 text-sm flex items-center justify-between">
-                <div>
-                  <div className="mono">{r.filename}</div>
-                  <div className="text-xs text-muted-foreground">大小 {Math.max(1, Math.round(r.size / 1024))} KB</div>
-                </div>
-                <Badge variant="secondary">CSV</Badge>
-              </div>
-            ))}
-          </div>
-        </div>
-      </details>
+      <GapCalcPanel productCode="ZZ-H2500011-磁芯检" result={MOCK_RESULT} />
     </div>
   );
 }

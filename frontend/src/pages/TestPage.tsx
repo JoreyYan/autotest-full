@@ -14,7 +14,7 @@ import { Input } from "@/components/ui/input";
 /** 气隙研磨计算面板（磁芯检产品专用）：FAIL 磁芯自动带入实测电感，调云端算法给研磨建议。 */
 const GAP_DEFAULTS = { np1: 9, ns1: 3, np2: -6, ns2: -6, n: 1.185, lk: 8.884, lm: 56.866, hgPri: 5.56, hgSec: 1.36, hgFilm: 0.6 };
 
-function GapCalcPanel({ productCode, result }: { productCode: string; result: TestResult | null }) {
+export function GapCalcPanel({ productCode, result }: { productCode: string; result: TestResult | null }) {
   const storeKey = `gapCalc:${productCode}`;
   const [cfg, setCfg] = useState<typeof GAP_DEFAULTS & { enabled: boolean }>(() => {
     try {
