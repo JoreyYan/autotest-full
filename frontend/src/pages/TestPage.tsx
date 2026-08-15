@@ -9,6 +9,7 @@ import { Separator } from "@/components/ui/separator";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
+import { Input } from "@/components/ui/input";
 
 function normalizeUnit(unit: string): string {
   return unit.replace("μ", "u").replace("渭", "u").replace("惟", "Ohm");
@@ -48,7 +49,8 @@ function typeLabel(type: string): string {
 
 function limitText(value: number | null | undefined, unit: string | null | undefined): string {
   if (value === null || value === undefined) return "-";
-  return unit ? `${value} ${unit}` : `${value}`;
+  const v = Number(parseFloat(value.toPrecision(10)));
+  return unit ? `${v} ${unit}` : `${v}`;
 }
 
 function renderConfigCheck(initData?: InitStatus) {
@@ -77,6 +79,16 @@ function getRealtimeState(args: { hasPort: boolean; ready: boolean; initPending:
 
 const TYPE_ORDER = ["Turn", "Lx", "Q", "Lk", "Cx", "Dcr"];
 
+// 从飞书链接中提取唯一记录 ID
+function extractSerialCode(raw: string): string {
+  const trimmed = raw.trim();
+  // 飞书记录链接: https://smartonep.feishu.cn/record/RIHurixiWeFAwaceOSocl0uenIe?...
+  const m = trimmed.match(/\/record\/([A-Za-z0-9]+)/);
+  if (m) return m[1];
+  // 如果不是飞书链接，直接用原文作为序列码
+  return trimmed;
+}
+
 export default function TestPage() {
   const [activeTab, setActiveTab] = useState("console");
   const [selectedProduct, setSelectedProduct] = useState<string>("");
@@ -84,6 +96,19 @@ export default function TestPage() {
   const [logs, setLogs] = useState<LogItem[]>([]);
   const [logCursor, setLogCursor] = useState(0);
   const [showLimits, setShowLimits] = useState(false);
+  const [fontScale, setFontScale] = useState<"md" | "lg" | "xl">(
+    () => (localStorage.getItem("resultFontScale") as "md" | "lg" | "xl") || "md"
+  );
+  const changeFontScale = (v: "md" | "lg" | "xl") => {
+    setFontScale(v);
+    localStorage.setItem("resultFontScale", v);
+  };
+  const [scannerMode, setScannerMode] = useState(true); // 默认扫码枪模式
+  const [lastScanCode, setLastScanCode] = useState("");
+  const [lastRecordNumber, setLastRecordNumber] = useState<string | null>(null);
+  const [lastScanUrl, setLastScanUrl] = useState("");
+  const [manualRecordNumber, setManualRecordNumber] = useState("");
+  const [manualCoreNumber, setManualCoreNumber] = useState("");
 
   const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.getProducts });
   const { data: status, refetch: refetchStatus } = useQuery({
@@ -101,6 +126,11 @@ export default function TestPage() {
     queryFn: () => api.getProduct(selectedProduct),
     enabled: Boolean(selectedProduct),
   });
+
+  const fixtureProducts = useMemo(
+    () => products.filter((p) => (p.workflow_type ?? "fixture_test") !== "incoming_inspection"),
+    [products]
+  );
 
   const logsQuery = useQuery({
     queryKey: ["logs", logCursor],
@@ -131,19 +161,103 @@ export default function TestPage() {
     onSuccess: () => refetchStatus(),
   });
 
-  const testMutation = useMutation({
-    mutationFn: api.runTest,
-    onSuccess: (data) => {
-      setLastResult(data);
-      setActiveTab("test");
-    },
-  });
   const disconnectMutation = useMutation({ mutationFn: api.disconnect, onSuccess: () => refetchStatus() });
 
   const isReady = Boolean(status?.ready && status?.product_code === selectedProduct);
+
+  const testMutation = useMutation({
+    mutationFn: (params?: { serialCode?: string; recordNumber?: string; coreNumber?: string }) => api.runTest(params),
+    onSuccess: (data) => {
+      setLastResult(data);
+      setActiveTab("test");
+      // 测试完成后清空手输字段，下一台重新输入
+      setManualRecordNumber("");
+      setManualCoreNumber("");
+    },
+  });
+
+  // 扫码枪监听：扫码枪模拟键盘快速输入，以 Enter 结束
+  useEffect(() => {
+    if (!scannerMode || !isReady) return;
+    let buffer = "";
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    function triggerScan(raw: string) {
+      const rawUrl = raw.trim();
+      const code = extractSerialCode(rawUrl);
+
+      // 扫码模式下也尊重产品配置的必填项
+      const reqRec = productDetail?.require_record_number !== false;
+      const reqCore = Boolean(productDetail?.require_core_number);
+      const recVal = manualRecordNumber.trim();
+      const coreVal = manualCoreNumber.trim();
+      if (reqRec && !recVal) {
+        console.warn('[scanner] 序号必填但未填，本次扫码忽略');
+        return;
+      }
+      if (reqCore && !coreVal) {
+        console.warn('[scanner] 磁芯编号必填但未填，本次扫码忽略');
+        return;
+      }
+
+      setLastScanCode(code);
+      setLastRecordNumber(recVal || null);
+      setLastScanUrl(rawUrl);
+      if (!testMutation.isPending) {
+        testMutation.mutate({ serialCode: code, recordNumber: recVal, coreNumber: coreVal });
+      }
+      // 仅当用户没手动填序号时才异步查飞书
+      if (!recVal && rawUrl.includes("feishu.cn/record/")) {
+        api.getFeishuRecordNumber(rawUrl).then((res) => {
+          if (res.ok && res.record_number !== null) {
+            setLastRecordNumber(String(res.record_number));
+          }
+        }).catch(() => {});
+      }
+    }
+
+    function handleKeyDown(e: KeyboardEvent) {
+      // 忽略来自 input/textarea 的事件
+      const tag = (e.target as HTMLElement)?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+
+      if (e.key === "Enter" && buffer.length > 5) {
+        e.preventDefault();
+        triggerScan(buffer);
+        buffer = "";
+      } else if (e.key.length === 1) {
+        buffer += e.key;
+        // 超过 500ms 没有新输入：如果 buffer 够长则自动触发（兼容不发 Enter 的扫码枪）
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => {
+          console.log(`[scanner] timeout fired, buffer="${buffer}" len=${buffer.length}`);
+          if (buffer.length > 5) {
+            triggerScan(buffer);
+          }
+          buffer = "";
+        }, 500);
+      }
+    }
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      if (timer) clearTimeout(timer);
+    };
+  }, [scannerMode, isReady, testMutation.isPending, productDetail?.require_record_number, productDetail?.require_core_number, manualRecordNumber, manualCoreNumber]);
+
+  // 序号和CSV都就绪后，补写序号到CSV
+  const [patchedCsv, setPatchedCsv] = useState("");
+  useEffect(() => {
+    if (lastRecordNumber && lastResult?.csv_file && lastResult.csv_file !== patchedCsv) {
+      setPatchedCsv(lastResult.csv_file);
+      api.patchRecordNumber(lastResult.csv_file, lastRecordNumber).catch(() => {});
+    }
+  }, [lastRecordNumber, lastResult?.csv_file]);
+
   const selectedName = useMemo(
-    () => products.find((p) => p.product_code === selectedProduct)?.product_name,
-    [products, selectedProduct]
+    () => fixtureProducts.find((p) => p.product_code === selectedProduct)?.product_name,
+    [fixtureProducts, selectedProduct]
   );
 
   const hasPort = Boolean(status?.port);
@@ -229,7 +343,7 @@ export default function TestPage() {
                         <SelectValue placeholder="请选择产品..." />
                       </SelectTrigger>
                       <SelectContent>
-                        {products.map((p) => (
+                        {fixtureProducts.map((p) => (
                           <SelectItem key={p.product_code} value={p.product_code}>
                             {p.product_code} - {p.product_name}
                           </SelectItem>
@@ -259,6 +373,12 @@ export default function TestPage() {
                 {renderConfigCheck(initMutation.data)}
 
                 <Separator />
+
+                <div className="flex items-center gap-3">
+                  <Switch checked={scannerMode} onCheckedChange={setScannerMode} />
+                  <span className="text-sm font-medium">扫码枪模式</span>
+                  <span className="text-xs text-muted-foreground">{scannerMode ? "已开启：扫码即测试，测试按钮隐藏" : "已关闭：手动点击测试按钮"}</span>
+                </div>
 
                 <div className="grid gap-3 md:grid-cols-3 text-sm">
                   <div className="rounded-lg border p-3 bg-secondary">
@@ -308,25 +428,124 @@ export default function TestPage() {
                 <span>测试结果</span>
                 <div className="flex items-center gap-2">
                   {statusBadge}
-                  <Button disabled={!isReady || testMutation.isPending} onClick={() => testMutation.mutate()}>
-                    {testMutation.isPending ? "测试中..." : "开始测试"}
-                  </Button>
+                  {scannerMode ? (
+                    (() => {
+                      const reqRec = productDetail?.require_record_number !== false;
+                      const reqCore = Boolean(productDetail?.require_core_number);
+                      const recOk = !reqRec || manualRecordNumber.trim().length > 0;
+                      const coreOk = !reqCore || manualCoreNumber.trim().length > 0;
+                      const ready = isReady && recOk && coreOk;
+                      let badgeText: string;
+                      if (testMutation.isPending) badgeText = "测试中...";
+                      else if (!isReady) badgeText = "未就绪";
+                      else if (!recOk) badgeText = "请先填序号";
+                      else if (!coreOk) badgeText = "请先填磁芯编号";
+                      else badgeText = "等待扫码...";
+                      return (
+                        <>
+                          {reqRec && (
+                            <Input
+                              placeholder="序号"
+                              value={manualRecordNumber}
+                              onChange={(e) => setManualRecordNumber(e.target.value)}
+                              className="h-10 w-32"
+                              disabled={testMutation.isPending}
+                            />
+                          )}
+                          {reqCore && (
+                            <Input
+                              placeholder="磁芯编号"
+                              value={manualCoreNumber}
+                              onChange={(e) => setManualCoreNumber(e.target.value)}
+                              className="h-10 w-32"
+                              disabled={testMutation.isPending}
+                            />
+                          )}
+                          <Badge variant={ready ? "default" : "secondary"} className="text-sm px-4 py-2">
+                            {badgeText}
+                          </Badge>
+                        </>
+                      );
+                    })()
+                  ) : (
+                    (() => {
+                      const reqRec = productDetail?.require_record_number !== false; // 默认 true
+                      const reqCore = Boolean(productDetail?.require_core_number);
+                      const recOk = !reqRec || manualRecordNumber.trim().length > 0;
+                      const coreOk = !reqCore || manualCoreNumber.trim().length > 0;
+                      const canRun = isReady && !testMutation.isPending && recOk && coreOk;
+                      return (
+                        <>
+                          {reqRec && (
+                            <Input
+                              placeholder="序号"
+                              value={manualRecordNumber}
+                              onChange={(e) => setManualRecordNumber(e.target.value)}
+                              className="h-10 w-32"
+                              disabled={testMutation.isPending}
+                            />
+                          )}
+                          {reqCore && (
+                            <Input
+                              placeholder="磁芯编号"
+                              value={manualCoreNumber}
+                              onChange={(e) => setManualCoreNumber(e.target.value)}
+                              className="h-10 w-32"
+                              disabled={testMutation.isPending}
+                            />
+                          )}
+                          <Button
+                            disabled={!canRun}
+                            onClick={() => {
+                              const num = manualRecordNumber.trim();
+                              const core = manualCoreNumber.trim();
+                              setLastScanCode("");
+                              setLastRecordNumber(num || null);
+                              setLastScanUrl("");
+                              testMutation.mutate({ recordNumber: num, coreNumber: core });
+                            }}
+                          >
+                            {testMutation.isPending ? "测试中..." : "开始测试"}
+                          </Button>
+                        </>
+                      );
+                    })()
+                  )}
                 </div>
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
+              {lastScanCode && (
+                <div className="rounded-lg border p-3 text-sm bg-blue-50 border-blue-200 text-blue-700 flex items-center gap-4">
+                  <div><span className="font-medium">序列码：</span><span className="mono">{lastScanCode}</span></div>
+                  {lastRecordNumber !== null && (
+                    <div><span className="font-medium">序号：</span><span className="mono text-lg font-bold">{lastRecordNumber}</span></div>
+                  )}
+                </div>
+              )}
               {!lastResult ? (
-                <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">还没有测试结果。完成一次测试后将在此展示。</div>
+                <div className="rounded-lg border border-dashed p-10 text-center text-sm text-muted-foreground">
+                  {scannerMode && isReady ? "扫码枪模式已开启，请扫描产品二维码开始测试" : "还没有测试结果。完成一次测试后将在此展示。"}
+                </div>
               ) : (
                 <>
-                  <div className="rounded-lg border p-3 text-sm bg-card">
-                    <div className="font-medium">总判定：{overall}</div>
+                  <div className={`rounded-lg border p-3 text-sm ${overall === "PASS" ? "bg-emerald-50 border-emerald-200" : "bg-rose-50 border-rose-200"}`}>
+                    <div className={`font-bold ${fontScale === "xl" ? "text-4xl" : fontScale === "lg" ? "text-2xl" : "text-lg"} ${overall === "PASS" ? "text-emerald-700" : "text-rose-700"}`}>总判定：{overall}</div>
                     <div className="text-xs text-muted-foreground mt-1">规则：任一单元格 Fail，即总结果 Fail。</div>
                   </div>
                   <div className="flex items-center gap-2">
                     <Switch checked={showLimits} onCheckedChange={setShowLimits} />
                     <span className="text-sm text-muted-foreground">显示限值（Fail 项始终显示）</span>
+                    <div className="ml-auto flex items-center gap-1">
+                      <span className="text-xs text-muted-foreground mr-1">字号</span>
+                      {(["md", "lg", "xl"] as const).map((v) => (
+                        <Button key={v} size="sm" variant={fontScale === v ? "default" : "outline"} className="h-7 px-2.5 text-xs" onClick={() => changeFontScale(v)}>
+                          {v === "md" ? "标准" : v === "lg" ? "大" : "特大"}
+                        </Button>
+                      ))}
+                    </div>
                   </div>
+                  <div className={fontScale === "xl" ? "[&_td]:text-3xl [&_td]:py-4 [&_th]:text-xl" : fontScale === "lg" ? "[&_td]:text-xl [&_td]:py-3 [&_th]:text-base" : ""}>
                   <Table>
                     <TableHeader>
                       <TableRow>
@@ -348,12 +567,12 @@ export default function TestPage() {
                             if (!cell) return <TableCell key={`${pins}-${type}`} className="text-center text-muted-foreground">-</TableCell>;
                             const fail = cell.result !== "Pass";
                             const cfg = (productDetail?.test_items ?? []).find((x) => x.pins === pins && x.test_type === type);
-                            const lowText = limitText(cfg?.lower_limit ?? null, cfg?.unit ?? null);
-                            const highText = limitText(cfg?.upper_limit ?? null, cfg?.unit ?? null);
+                            const lowText = limitText(cfg?.lower_limit ?? cell.lo_display ?? null, cfg?.unit ?? cell.unit ?? null);
+                            const highText = limitText(cfg?.upper_limit ?? cell.hi_display ?? null, cfg?.unit ?? cell.unit ?? null);
                             return (
                               <TableCell key={`${pins}-${type}`} className={`text-center mono ${fail ? "bg-rose-50 text-rose-700 font-semibold" : "text-foreground"}`}>
                                 <div>{formatDisplayValue(cell, cfg?.unit ?? null)}</div>
-                                {(showLimits || fail) && <div className="text-[10px] font-normal leading-4 text-muted-foreground">{lowText} ~ {highText}</div>}
+                                {(showLimits || fail) && <div className="text-[0.55em] font-normal leading-snug text-muted-foreground">{lowText} ~ {highText}</div>}
                               </TableCell>
                             );
                           })}
@@ -361,6 +580,7 @@ export default function TestPage() {
                       ))}
                     </TableBody>
                   </Table>
+                  </div>
                 </>
               )}
             </CardContent>

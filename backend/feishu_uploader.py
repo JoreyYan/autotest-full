@@ -520,6 +520,49 @@ class FeishuUploader:
     # ── 工位注册 + 参数下发（第2步：ERP集中管控）────────────
     DEPLOY_TABLE = 'tblWq5o4RzT9A4rk'   # _工位
     PARAM_TABLE = 'tblly75fVtVGiram'    # _产品参数
+    RELEASE_TABLE = 'tbltEfMJtSFPU3mO'  # _软件版本（自动更新通道）
+
+    def fetch_latest_release(self) -> Optional[dict]:
+        """读 _软件版本 表，返回版本号最大的一行：
+        {version, notes, file_token, file_name, file_size}；无可用版本返回 None。"""
+        def _ver_key(v: str):
+            try:
+                return tuple(int(x) for x in v.strip().lstrip('vV').split('.'))
+            except Exception:
+                return (0,)
+        best = None
+        for r in self._list_records(self.RELEASE_TABLE):
+            f = r.get('fields') or {}
+            ver = _flatten_text(f.get('版本号')).strip().lstrip('vV')
+            att = f.get('安装包') or []
+            if not ver or not att:
+                continue
+            a = att[0]
+            item = {
+                'version': ver,
+                'notes': _flatten_text(f.get('说明')).strip(),
+                'file_token': a.get('file_token'),
+                'file_name': a.get('name') or '',
+                'file_size': int(a.get('size') or 0),
+            }
+            if best is None or _ver_key(item['version']) > _ver_key(best['version']):
+                best = item
+        return best
+
+    def download_release_file(self, file_token: str, dest_path: Path) -> int:
+        """下载 _软件版本 表附件到 dest_path，返回写入字节数。"""
+        url = f'{FEISHU_BASE}/drive/v1/medias/{file_token}/download'
+        headers = {'Authorization': f'Bearer {self._get_token()}'}
+        with self._session.get(url, headers=headers, timeout=(10, 600),
+                               stream=True, allow_redirects=True) as r:
+            r.raise_for_status()
+            n = 0
+            with open(dest_path, 'wb') as fh:
+                for chunk in r.iter_content(1 << 20):
+                    if chunk:
+                        fh.write(chunk)
+                        n += len(chunk)
+            return n
 
     def register_station(self, company: str, line: str, station: str) -> str:
         """注册工位到飞书 _工位 表，返回生成的 deployment_id（查重，重复加序号）。"""

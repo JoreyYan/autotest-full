@@ -18,7 +18,7 @@ from .csv_writer import save
 from .inspection_csv_writer import save as save_inspection
 from .feishu_uploader import get_uploader
 
-APP_VERSION = '1.4.2'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
+APP_VERSION = '1.5.0'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
 
 app = FastAPI(title='变压器测试系统', version=APP_VERSION)
 
@@ -58,6 +58,11 @@ def _startup_feishu_uploader():
         logs.log(f'软件 v{APP_VERSION} · 参数自动同步已开启（每5分钟）', sticky=True)
     except Exception as e:
         logs.log(f'自动同步启动失败: {e}', 'WARN', sticky=True)
+    # 启动软件更新检查线程（每小时查飞书 _软件版本 表）
+    try:
+        threading.Thread(target=_auto_update_check_loop, daemon=True, name='update-check').start()
+    except Exception as e:
+        logs.log(f'更新检查启动失败: {e}', 'WARN', sticky=True)
 
 
 @app.get('/api/version')
@@ -411,6 +416,150 @@ def _do_sync_params() -> dict:
         parts = [f"{u['product_code']}(v{u['version']})" for u in updated]
         logs.log('参数已更新: ' + ', '.join(parts), sticky=True)
     return {'ok': True, 'updated': updated, 'archived': archived, 'total_remote': len(remote)}
+
+
+# ── 软件自动更新（飞书 _软件版本 表为更新通道）────────────────────
+
+_UPDATE_BAT = r'''@echo off
+cd /d %~dp0
+timeout /t 3 /nobreak >nul
+taskkill /f /im smarton-backend.exe >nul 2>&1
+timeout /t 2 /nobreak >nul
+copy /y "__NEWREL__\smarton-backend.exe" "smarton-backend.exe" >nul
+if errorlevel 1 copy /y "backup\smarton-backend.exe" "smarton-backend.exe" >nul
+if exist "__NEWREL__\smarton.exe" copy /y "__NEWREL__\smarton.exe" "smarton.exe" >nul 2>&1
+if exist "__NEWREL__\frontend\dist" (
+  rd /s /q "frontend\dist" >nul 2>&1
+  xcopy /y /e /i "__NEWREL__\frontend\dist" "frontend\dist" >nul
+)
+if exist "__NEWREL__\更新日志.md" copy /y "__NEWREL__\更新日志.md" "更新日志.md" >nul 2>&1
+start "" "smarton.exe"
+timeout /t 2 /nobreak >nul
+rd /s /q "update_tmp" >nul 2>&1
+del "%~f0"
+'''
+
+
+def _version_tuple(v: str):
+    try:
+        return tuple(int(x) for x in str(v).strip().lstrip('vV').split('.'))
+    except Exception:
+        return (0,)
+
+
+def _check_update() -> dict:
+    """查飞书 _软件版本 表，比较版本。返回给前端的 dict（内部字段 _rel 供 apply 用）。"""
+    uploader = get_uploader(Path.cwd())
+    if not uploader:
+        return {'ok': False, 'error': '飞书未配置'}
+    try:
+        rel = uploader.fetch_latest_release()
+    except Exception as e:
+        return {'ok': False, 'error': f'检查更新失败: {e}'}
+    if not rel or not rel.get('file_token'):
+        return {'ok': True, 'current': APP_VERSION, 'available': False}
+    available = _version_tuple(rel['version']) > _version_tuple(APP_VERSION)
+    return {
+        'ok': True, 'current': APP_VERSION, 'latest': rel['version'],
+        'notes': rel.get('notes', ''), 'file_size': rel.get('file_size', 0),
+        'available': available, '_rel': rel,
+    }
+
+
+def _download_and_stage(rel: dict) -> Path:
+    """下载 zip → 校验 → 解压到 update_tmp/new → 备份当前 exe → 写 update.bat。"""
+    import zipfile
+    import shutil
+    uploader = get_uploader(Path.cwd())
+    work = Path.cwd()
+    tmp = work / 'update_tmp'
+    if tmp.exists():
+        shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    zip_path = tmp / 'release.zip'
+    logs.log(f"下载新版本 v{rel['version']}（{rel.get('file_size', 0) // 1024 // 1024}MB）...", sticky=True)
+    n = uploader.download_release_file(rel['file_token'], zip_path)
+    if rel.get('file_size') and n != rel['file_size']:
+        raise RuntimeError(f'下载不完整：{n} != {rel["file_size"]} 字节')
+    new_dir = tmp / 'new'
+    with zipfile.ZipFile(zip_path) as z:
+        z.extractall(new_dir)
+    # zip 可能带一层顶级目录
+    if not (new_dir / 'smarton-backend.exe').exists():
+        subs = [d for d in new_dir.iterdir() if d.is_dir()]
+        if len(subs) == 1 and (subs[0] / 'smarton-backend.exe').exists():
+            new_dir = subs[0]
+    if not (new_dir / 'smarton-backend.exe').exists():
+        raise RuntimeError('安装包无效：缺 smarton-backend.exe')
+    if not (new_dir / 'frontend' / 'dist').exists():
+        raise RuntimeError('安装包无效：缺 frontend/dist')
+    # 备份当前 exe（bat 替换失败时自动回滚）
+    bak = work / 'backup'
+    bak.mkdir(exist_ok=True)
+    shutil.copy2(work / 'smarton-backend.exe', bak / 'smarton-backend.exe')
+    new_rel = str(new_dir.relative_to(work))
+    (work / 'update.bat').write_text(_UPDATE_BAT.replace('__NEWREL__', new_rel), encoding='gbk')
+    return new_dir
+
+
+def _launch_updater_and_exit():
+    """启动 update.bat（独立进程）后退出自身，由 bat 完成替换并重启。"""
+    import subprocess
+    import os
+    import time as _t
+    _t.sleep(1.0)  # 让 HTTP 响应先送达前端
+    logs.log('开始应用更新，软件即将自动重启...', 'WARN', sticky=True)
+    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW
+    subprocess.Popen(['cmd', '/c', str(Path.cwd() / 'update.bat')],
+                     cwd=str(Path.cwd()), creationflags=flags)
+    _t.sleep(0.5)
+    os._exit(0)
+
+
+@app.get('/api/update/check')
+def update_check():
+    r = _check_update()
+    r.pop('_rel', None)
+    return r
+
+
+@app.post('/api/update/apply')
+def update_apply():
+    r = _check_update()
+    if not r.get('ok'):
+        raise HTTPException(500, r.get('error', '检查更新失败'))
+    if not r.get('available'):
+        raise HTTPException(400, '已是最新版本，无需更新')
+    try:
+        _download_and_stage(r['_rel'])
+    except Exception as e:
+        logs.log(f'更新下载/校验失败: {e}', 'ERROR', sticky=True)
+        raise HTTPException(500, f'下载/校验失败: {e}')
+    threading.Thread(target=_launch_updater_and_exit, daemon=True).start()
+    return {'ok': True, 'message': f"开始更新到 v{r['latest']}，约 30 秒后自动恢复"}
+
+
+def _auto_update_check_loop():
+    """每小时查一次新版本：发现即在日志区提示；config 里 auto_update=true 且仪器空闲时自动更新。"""
+    import time as _t
+    _t.sleep(60)
+    while True:
+        try:
+            r = _check_update()
+            if r.get('available'):
+                logs.log(f"发现新版本 v{r['latest']}（当前 v{APP_VERSION}），请在页面顶部点击「立即更新」",
+                         'WARN', sticky=True)
+                auto = False
+                try:
+                    auto = bool(json.loads((Path.cwd() / 'config.json').read_text(encoding='utf-8')).get('auto_update'))
+                except Exception:
+                    auto = False
+                if auto and not (state.runner is not None and state.runner._ready):
+                    _download_and_stage(r['_rel'])
+                    _launch_updater_and_exit()
+        except Exception:
+            pass
+        _t.sleep(3600)
 
 
 @app.post('/api/deployment/sync-params')
