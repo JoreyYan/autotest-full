@@ -18,7 +18,7 @@ from .csv_writer import save
 from .inspection_csv_writer import save as save_inspection
 from .feishu_uploader import get_uploader
 
-APP_VERSION = '1.5.0'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
+APP_VERSION = '1.5.1'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
 
 app = FastAPI(title='变压器测试系统', version=APP_VERSION)
 
@@ -514,6 +514,38 @@ def _launch_updater_and_exit():
                      cwd=str(Path.cwd()), creationflags=flags)
     _t.sleep(0.5)
     os._exit(0)
+
+
+# ── 气隙研磨计算（转发 ERP 云端算法，产线 FAIL 磁芯自动算研磨建议）──
+
+class GapCalcRequest(BaseModel):
+    NNv: list
+    params_target: list
+    current_Locsc_uH: list
+    hg_pri_mm: float
+    hg_sec_mm: float
+    hg_film_mm: float
+    perf_core_pctg_target: Optional[list] = None
+    perf_trans_pctg_target: Optional[list] = None
+
+
+@app.post('/api/gap-calc')
+def gap_calc(req: GapCalcRequest):
+    """转发到 soaipower.com 的气隙计算服务（算法依赖 scipy/sympy，不适合打进本地 exe）。"""
+    import requests as _rq
+    payload = req.dict()
+    if payload.get('perf_core_pctg_target') is None:
+        payload['perf_core_pctg_target'] = [2.5, 2.5, 2.5, 2.5, 0.6, 2.5]
+    if payload.get('perf_trans_pctg_target') is None:
+        payload['perf_trans_pctg_target'] = [5, 5, 5, 5, 1, 5]
+    try:
+        r = _rq.post('https://www.soaipower.com/api/hg-calc', json=payload, timeout=(10, 90))
+        data = r.json()
+    except Exception as e:
+        raise HTTPException(502, f'气隙计算服务不可达: {e}')
+    if r.status_code != 200:
+        raise HTTPException(502, data.get('error') or '气隙计算失败')
+    return data
 
 
 @app.get('/api/update/check')

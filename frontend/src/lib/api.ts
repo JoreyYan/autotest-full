@@ -254,6 +254,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ company, line, station }),
     }),
+  gapCalc: (params: {
+    NNv: number[][];
+    params_target: number[];
+    current_Locsc_uH: number[];
+    hg_pri_mm: number;
+    hg_sec_mm: number;
+    hg_film_mm: number;
+  }) =>
+    request<{ result: string }>("/gap-calc", { method: "POST", body: JSON.stringify(params) }),
   checkUpdate: () =>
     request<{ ok: boolean; current: string; latest?: string; notes?: string; file_size?: number; available: boolean; error?: string }>(
       "/update/check"

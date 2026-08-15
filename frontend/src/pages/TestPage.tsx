@@ -11,6 +11,143 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
 import { Input } from "@/components/ui/input";
 
+/** 气隙研磨计算面板（磁芯检产品专用）：FAIL 磁芯自动带入实测电感，调云端算法给研磨建议。 */
+const GAP_DEFAULTS = { np1: 9, ns1: 3, np2: -6, ns2: -6, n: 1.185, lk: 8.884, lm: 56.866, hgPri: 5.56, hgSec: 1.36, hgFilm: 0.6 };
+
+function GapCalcPanel({ productCode, result }: { productCode: string; result: TestResult | null }) {
+  const storeKey = `gapCalc:${productCode}`;
+  const [cfg, setCfg] = useState<typeof GAP_DEFAULTS & { enabled: boolean }>(() => {
+    try {
+      const saved = localStorage.getItem(storeKey);
+      if (saved) return { ...GAP_DEFAULTS, enabled: false, ...JSON.parse(saved) };
+    } catch { /* ignore */ }
+    return { ...GAP_DEFAULTS, enabled: false };
+  });
+  const [calcText, setCalcText] = useState("");
+  const [calcErr, setCalcErr] = useState("");
+  const [calcing, setCalcing] = useState(false);
+  const [calcedFor, setCalcedFor] = useState("");
+
+  const upd = (patch: Partial<typeof cfg>) => {
+    setCfg((prev) => {
+      const next = { ...prev, ...patch };
+      localStorage.setItem(storeKey, JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const pick = (type: string, pins: string): number | null => {
+    const it = result?.items.find((x) => x.type === type && x.pins === pins);
+    if (!it) return null;
+    const v = it.value_display ?? it.value;
+    return typeof v === "number" && !Number.isNaN(v) ? v : null;
+  };
+  const lOc1 = pick("Lx", "2-3");
+  const lOc2 = pick("Lx", "6-5");
+  const lSc1 = pick("Lk", "2-3");
+  const lSc2 = pick("Lk", "6-5");
+  const measuredOk = lOc1 != null && lOc2 != null && lSc1 != null && lSc2 != null;
+
+  const runCalc = async () => {
+    if (!measuredOk) return;
+    setCalcing(true);
+    setCalcErr("");
+    setCalcText("");
+    try {
+      const d = await api.gapCalc({
+        NNv: [[cfg.np1, cfg.ns1], [cfg.np2, cfg.ns2]],
+        params_target: [cfg.n, cfg.lk, cfg.lm],
+        current_Locsc_uH: [lOc1 as number, lOc2 as number, lSc1 as number, lSc2 as number],
+        hg_pri_mm: cfg.hgPri,
+        hg_sec_mm: cfg.hgSec,
+        hg_film_mm: cfg.hgFilm,
+      });
+      setCalcText(d.result);
+    } catch (e) {
+      setCalcErr((e as Error).message);
+    } finally {
+      setCalcing(false);
+    }
+  };
+
+  // FAIL 结果出来后自动计算一次（同一份结果不重复算）
+  useEffect(() => {
+    const stamp = result?.timestamp || "";
+    if (cfg.enabled && result?.overall === "FAIL" && measuredOk && stamp && stamp !== calcedFor) {
+      setCalcedFor(stamp);
+      runCalc();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result?.timestamp, cfg.enabled]);
+
+  const numInput = (label: string, key: keyof typeof GAP_DEFAULTS, step = 0.01, wide = false) => (
+    <div>
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <Input type="number" step={step} className={`h-8 ${wide ? "w-24" : "w-20"} text-right mono`}
+        value={cfg[key]} onChange={(e) => upd({ [key]: Number(e.target.value || 0) } as Partial<typeof cfg>)} />
+    </div>
+  );
+
+  return (
+    <Card className="panel border-amber-200">
+      <CardHeader className="pb-2">
+        <CardTitle className="flex items-center justify-between text-base">
+          <span>气隙研磨计算（磁芯检）</span>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-normal text-muted-foreground">{cfg.enabled ? "已开启：FAIL 自动计算" : "已关闭"}</span>
+            <Switch checked={cfg.enabled} onCheckedChange={(v) => upd({ enabled: v })} />
+          </div>
+        </CardTitle>
+      </CardHeader>
+      {cfg.enabled && (
+        <CardContent className="space-y-3">
+          <div className="grid gap-3 md:grid-cols-2">
+            <div className="rounded-lg border p-3">
+              <div className="text-xs font-medium mb-2">实测电感 μH（自动带入本次结果）</div>
+              <div className="grid grid-cols-2 gap-2 text-sm mono">
+                <div>原电感 Lx2-3：<b>{lOc1 ?? "—"}</b></div>
+                <div>副电感 Lx6-5：<b>{lOc2 ?? "—"}</b></div>
+                <div>原漏感 Lk2-3：<b>{lSc1 ?? "—"}</b></div>
+                <div>副漏感 Lk6-5：<b>{lSc2 ?? "—"}</b></div>
+              </div>
+            </div>
+            <div className="rounded-lg border p-3">
+              <div className="text-xs font-medium mb-2">当前气隙尺寸 (mm)（可修改）</div>
+              <div className="flex flex-wrap gap-3">
+                {numInput("原边月牙中柱", "hgPri", 0.01, true)}
+                {numInput("副边圆形中柱", "hgSec", 0.01, true)}
+                {numInput("边柱胶带厚度", "hgFilm", 0.01, true)}
+              </div>
+            </div>
+          </div>
+          <details className="rounded-lg border p-3">
+            <summary className="text-xs font-medium cursor-pointer select-none">匝数与目标参数（默认已按模板填好，一般不用改）</summary>
+            <div className="flex flex-wrap gap-3 mt-3">
+              {numInput("Np1", "np1", 1)}
+              {numInput("Ns1", "ns1", 1)}
+              {numInput("Np2", "np2", 1)}
+              {numInput("Ns2", "ns2", 1)}
+              {numInput("等效匝比n", "n", 0.001, true)}
+              {numInput("漏感Lk", "lk", 0.001, true)}
+              {numInput("励磁Lm", "lm", 0.001, true)}
+            </div>
+          </details>
+          <div className="flex items-center gap-3">
+            <Button onClick={runCalc} disabled={!measuredOk || calcing}>
+              {calcing ? "计算中..." : "计算研磨建议"}
+            </Button>
+            {!measuredOk && <span className="text-xs text-muted-foreground">测一发后自动带入实测电感</span>}
+            {calcErr && <span className="text-xs text-rose-600">计算失败：{calcErr}</span>}
+          </div>
+          {calcText && (
+            <pre className="whitespace-pre-wrap text-sm mono bg-slate-50 border rounded-lg p-4 leading-relaxed overflow-x-auto">{calcText}</pre>
+          )}
+        </CardContent>
+      )}
+    </Card>
+  );
+}
+
 function normalizeUnit(unit: string): string {
   return unit.replace("μ", "u").replace("渭", "u").replace("惟", "Ohm");
 }
@@ -585,6 +722,10 @@ export default function TestPage() {
               )}
             </CardContent>
           </Card>
+
+          {selectedProduct.includes("磁芯检") && (
+            <GapCalcPanel productCode={selectedProduct} result={lastResult} />
+          )}
         </TabsContent>
 
         <TabsContent value="files" className="mt-4">
