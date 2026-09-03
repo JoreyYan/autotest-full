@@ -18,7 +18,7 @@ from .csv_writer import save
 from .inspection_csv_writer import save as save_inspection
 from .feishu_uploader import get_uploader
 
-APP_VERSION = '1.5.2'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
+APP_VERSION = '1.7.3'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
 
 app = FastAPI(title='变压器测试系统', version=APP_VERSION)
 
@@ -128,7 +128,8 @@ def list_products():
                 'workflow_type': data.get('workflow_type', 'fixture_test'),
                 'test_items_count': len(data.get('test_items', [])),
                 'inspection_steps_count': len(data.get('inspection_steps', [])),
-                'description': data.get('description', '')
+                'description': data.get('description', ''),
+                'config_version': data.get('_version', 0)
             })
         except Exception:
             pass
@@ -161,6 +162,7 @@ class ProductBody(BaseModel):
     eq_n_vars: dict = Field(default_factory=lambda: {'l_raw': 'A', 'lk_raw': 'B', 'l_aux': 'C'})
     require_record_number: bool = True
     require_core_number: bool = False
+    golden_sample: dict = Field(default_factory=dict)   # 扣偏校验(金样)配置:{enabled,tolerance_pct,items}
 
 
 @app.post('/api/products', status_code=201)
@@ -251,6 +253,7 @@ def initialize(req: InitRequest):
     if status['ok']:
         state.runner = runner
         state.current_product = req.product_code
+        state.reset_calibration()   # 换连接/换产品后必须重新扣偏校验
         # 记住成功的端口
         if status.get('port'):
             state.save_port(status['port'])
@@ -269,7 +272,86 @@ def get_status():
         'ready': state.runner is not None and state.runner._ready,
         'product_code': state.current_product,
         'port': state.get_port(),
+        'config_version': (state.runner.product.get('_version')
+                           if state.runner and getattr(state.runner, 'product', None) else None),
     }
+
+
+def _golden_cfg() -> dict:
+    """当前产品的金样(标准磁芯)校验配置。config JSON里:
+    golden_sample: {enabled, tolerance_pct, items:[{test_type,pins,standard_value}]}"""
+    try:
+        if state.runner and getattr(state.runner, 'product', None):
+            return state.runner.product.get('golden_sample') or {}
+    except Exception:
+        pass
+    return {}
+
+
+@app.get('/api/calibration/status')
+def calibration_status():
+    g = _golden_cfg()
+    return {'enabled': bool(g.get('enabled')), 'tolerance_pct': g.get('tolerance_pct', 0.5),
+            'items': g.get('items') or [], 'ready': state.runner is not None and state.runner._ready,
+            'product_code': state.current_product, **state.calibration}
+
+
+@app.post('/api/calibration/run')
+def calibration_run():
+    """扣偏校验:操作员按仪器面板完成偏差扣除、放上标准磁芯后点击。
+    软件触发一次测量,与标准值比对,全部误差≤阈值 → 校验通过,解锁正式测试。
+    (不存CSV、不推飞书——校验测量不是生产记录)"""
+    if not state.runner or not state.runner._ready:
+        raise HTTPException(400, '仪器未初始化，请先调用 /api/initialize')
+    g = _golden_cfg()
+    if not g.get('enabled'):
+        raise HTTPException(400, '该产品未启用扣偏校验(配置里没有golden_sample)')
+    std_items = g.get('items') or []
+    if not std_items:
+        raise HTTPException(400, '扣偏校验配置里没有标准值items')
+    tol = float(g.get('tolerance_pct') or 0.5)
+    logs.log('扣偏校验:触发标准磁芯测量')
+    record = state.runner.run()
+    if record is None:
+        raise HTTPException(500, '校验测量失败:仪器无响应')
+    meas = {(str(i.get('type')), str(i.get('pins'))): i.get('value_display')
+            for i in record.items}
+    detail, all_ok = [], True
+    for s in std_items:
+        key = (str(s.get('test_type', '')).strip(), str(s.get('pins', '')).strip())
+        std = s.get('standard_value')
+        m = meas.get(key)
+        row = {'test_type': key[0], 'pins': key[1], 'standard': std, 'measured': m}
+        if m is None or not isinstance(std, (int, float)) or std == 0:
+            row['error_pct'] = None
+            row['ok'] = False
+        else:
+            err = abs(m - std) / abs(std) * 100
+            row['error_pct'] = round(err, 3)
+            row['ok'] = err <= tol
+        all_ok = all_ok and row['ok']
+        detail.append(row)
+    from datetime import datetime
+    now = datetime.now()
+    cal_id = now.strftime('%Y%m%d-%H%M%S')
+    state.calibration['passed'] = all_ok
+    state.calibration['checked_at'] = now.strftime('%Y-%m-%d %H:%M:%S')
+    state.calibration['detail'] = detail
+    state.calibration['id'] = cal_id if all_ok else None
+    logs.log(f"扣偏校验{'通过 ✓' if all_ok else '未通过 ✗'}(阈值±{tol}%) ID={cal_id}")
+    # 推飞书扣偏校验记录(成败都记,便于ERP追溯)
+    dep = state.get_deployment()
+    uploader = get_uploader(Path.cwd())
+    if uploader:
+        uploader.push_calibration({
+            'id': cal_id, 'passed': all_ok, 'tolerance_pct': tol, 'detail': detail,
+            'product_code': state.current_product or '',
+            'deployment_id': dep.get('deployment_id', ''),
+            'company': dep.get('company', ''), 'line': dep.get('line', ''),
+            'station': dep.get('station', ''),
+        })
+    return {'ok': True, 'passed': all_ok, 'tolerance_pct': tol, 'detail': detail,
+            'checked_at': state.calibration['checked_at'], 'id': cal_id}
 
 
 @app.post('/api/test/run')
@@ -280,6 +362,9 @@ def run_test(req: RunTestRequest = RunTestRequest()):
     """
     if not state.runner or not state.runner._ready:
         raise HTTPException(400, '仪器未初始化，请先调用 /api/initialize')
+    # 扣偏校验门禁:启用了金样校验的产品,校验未通过不允许正式测试
+    if _golden_cfg().get('enabled') and not state.calibration.get('passed'):
+        raise HTTPException(400, '扣偏校验未通过:请按操作规程完成仪器偏差扣除,放上标准磁芯后点「扣偏校验」')
 
     logs.log(f'开始测试' + (f'，序列码={req.serial_code}' if req.serial_code else ''))
     record = state.runner.run()
@@ -314,6 +399,7 @@ def run_test(req: RunTestRequest = RunTestRequest()):
             'line': dep.get('line', ''),
             'station': dep.get('station', ''),
             'deployment_id': dep.get('deployment_id', ''),
+            'calibration_id': state.calibration.get('id') or '',
         })
 
     return TestResult(
@@ -412,10 +498,27 @@ def _do_sync_params() -> dict:
             except Exception:
                 pass
 
+    # 热更新:当前已初始化的产品若在本次更新里,直接刷新runner配置(仪器预设未变时),免重新初始化
+    cur = state.current_product
+    if cur and state.runner and any(u['product_code'] == cur for u in updated):
+        try:
+            new_cfg = json.loads((products_dir / f'{cur}.json').read_text(encoding='utf-8'))
+            old_icid = (getattr(state.runner, 'product', None) or {}).get('instrument_config_id')
+            if new_cfg.get('instrument_config_id') == old_icid:
+                state.runner.product = new_cfg
+                state.reset_calibration()
+                logs.log(f"当前产品配置已热更新至 v{new_cfg.get('_version')}，扣偏校验需重新执行", sticky=True)
+            else:
+                logs.log('新配置更换了仪器预设，请重新初始化后生效', sticky=True)
+        except Exception:
+            pass
+
     if updated:
         parts = [f"{u['product_code']}(v{u['version']})" for u in updated]
         logs.log('参数已更新: ' + ', '.join(parts), sticky=True)
-    return {'ok': True, 'updated': updated, 'archived': archived, 'total_remote': len(remote)}
+    local_versions = {i['product_code']: i['version'] for i in remote}
+    return {'ok': True, 'updated': updated, 'archived': archived,
+            'total_remote': len(remote), 'local_versions': local_versions}
 
 
 # ── 软件自动更新（飞书 _软件版本 表为更新通道）────────────────────
@@ -597,6 +700,7 @@ def _auto_update_check_loop():
 @app.post('/api/deployment/sync-params')
 def sync_deployment_params():
     """手动同步参数（前端按钮）。"""
+    state.reset_calibration()   # 配置可能变了,扣偏校验重新来
     r = _do_sync_params()
     if not r.get('ok'):
         raise HTTPException(400, r.get('error', '同步失败'))

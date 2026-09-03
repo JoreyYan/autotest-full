@@ -9,7 +9,8 @@ import math
 from dataclasses import dataclass, field
 from pathlib import Path
 from .serial_conn import find_instrument
-from .instrument import Instrument
+from .base_instrument import BaseInstrument
+from .instrument_registry import FIXTURE_TEST_DRIVERS, get_instrument_driver
 from .config_checker import check, CheckResult
 
 
@@ -25,6 +26,9 @@ class TestRecord:
     failed: int = 0
     overall: str = 'FAIL'   # 'PASS' or 'FAIL'
     csv_raw: str = ''        # 原始CSV（备用）
+    serial_code: str = ''    # 扫码枪扫到的产品序列码
+    record_number: str = ''  # 飞书序号 / 人工输入序号
+    core_number: str = ''    # 磁芯编号（人工输入）
 
 
 def parse_csv(csv_text: str) -> list[dict]:
@@ -104,10 +108,20 @@ class TestRunner:
             record = runner.run()      # 每次测试调用一次
     """
 
+    def _resolve_driver(self) -> tuple[str, type[BaseInstrument]]:
+        driver_name = str(self.product.get("instrument_driver", "uce")).strip().lower() or "uce"
+        driver_cls = get_instrument_driver(driver_name)
+        if driver_cls is None:
+            raise ValueError(f"unsupported instrument driver: {driver_name}")
+        if driver_name not in FIXTURE_TEST_DRIVERS:
+            raise ValueError(f"instrument driver {driver_name} is not supported by fixture test runner yet")
+        return driver_name, driver_cls
+
     def __init__(self, product_json_path: str, logger=None):
         with open(product_json_path, encoding='utf-8') as f:
             self.product = json.load(f)
-        self._instr: Instrument | None = None
+        self.product.setdefault("instrument_driver", "uce")
+        self._instr: BaseInstrument | None = None
         self._ready = False
         self._log = logger or (lambda *args, **kwargs: None)
 
@@ -122,24 +136,43 @@ class TestRunner:
         返回字典：{ok, port, idn, config_check, message}
         """
         status = {'ok': False, 'port': None, 'idn': '', 'config_check': None, 'message': ''}
+        try:
+            driver_name, driver_cls = self._resolve_driver()
+        except ValueError as exc:
+            status['message'] = str(exc)
+            self._emit(status['message'])
+            return status
 
-        # 步骤1+2：找端口
-        self._emit('扫描串口，查找 UC2866XB...')
-        found_port = find_instrument(baudrate=baudrate, preferred_port=port)
+        # detect device
+        self._emit(f'detecting instrument, driver={driver_name} ...')
+        found_port = find_instrument(
+            baudrate=baudrate,
+            preferred_port=port,
+            idn_signature=driver_cls.IDN_SIGNATURE,
+        )
         if not found_port:
-            status['message'] = '未找到 UC2866XB 仪器，请检查连接'
+            status['message'] = f'no matching instrument found for driver={driver_name}'
             self._emit(status['message'])
             return status
         status['port'] = found_port
-        self._emit(f'已找到端口：{found_port}')
+        self._emit(f'instrument found on port {found_port}')
 
-        # 连接
-        self._emit(f'连接串口 {found_port} @ {baudrate} bps')
-        self._instr = Instrument(found_port, baudrate)
+        # connect
+        self._emit(f'connecting serial port {found_port} @ {baudrate} bps')
+        self._instr = driver_cls(found_port, baudrate)
         if not self._instr.connect():
             status['message'] = f'串口 {found_port} 连接失败'
             self._emit(status['message'])
             return status
+
+        # 按索引回数的仪器（如 uc2910）：用产品 JSON 中各类型测试项的顺序生成引脚映射
+        if hasattr(self._instr, 'set_pin_map'):
+            pin_map: dict[str, list[str]] = {}
+            for it in self.product.get('test_items', []):
+                t, p = it.get('test_type'), it.get('pins')
+                if t and p:
+                    pin_map.setdefault(t, []).append(p)
+            self._instr.set_pin_map(pin_map)
 
         # 步骤2：确认IDN
         self._emit('发送 *IDN?')
@@ -161,7 +194,12 @@ class TestRunner:
         self._emit('发送 *TRG（初始化触发）')
         ok, csv = self._instr.run_test()
         if not ok:
-            status['message'] = '初始化 *TRG 无响应，请检查仪器状态'
+            if csv == '__NO_ACK__':
+                status['message'] = '*TRG 无响应：仪器未返回确认字节，请检查仪器是否开机并处于远程模式'
+            elif csv == '__NO_CSV__':
+                status['message'] = '*TRG 已触发但未收到测试数据：请检查仪器上是否已保存对应的测试配置文件'
+            else:
+                status['message'] = '初始化 *TRG 失败，请检查仪器状态'
             self._emit(status['message'])
             return status
         self._emit(f'收到 CSV：{len(csv)} 字符')
@@ -205,7 +243,12 @@ class TestRunner:
         self._emit('发送 *TRG（开始测试）')
         ok, csv = self._instr.run_test()
         if not ok:
-            self._emit('测试失败：*TRG 无响应')
+            if csv == '__NO_ACK__':
+                self._emit('测试失败：仪器未返回确认字节，请检查仪器连接')
+            elif csv == '__NO_CSV__':
+                self._emit('测试失败：仪器已触发但未返回测试数据，请检查仪器配置是否已保存')
+            else:
+                self._emit('测试失败：*TRG 无响应')
             return None
         self._emit(f'收到 CSV：{len(csv)} 字符')
 
@@ -224,7 +267,9 @@ class TestRunner:
         items: list[dict] = []
         symbols: dict[str, float] = {}
         for item in raw_items:
-            cfg = config_map.get((item["type"], item["pins"]), {})
+            key = (item["type"], item["pins"])
+            configured = key in config_map
+            cfg = config_map.get(key, {})
             unit = _normalize_unit(cfg.get("unit"))
             value_display = _convert_si_to_display(float(item["value"]), unit)
             symbol = str(cfg.get("symbol", "")).strip().upper()
@@ -233,13 +278,30 @@ class TestRunner:
             lo_display = cfg.get("lower_limit")
             hi_display = cfg.get("upper_limit")
 
+            # 用 JSON 配置的上下限重新判定 Pass/Fail（不依赖仪器判定）。
+            # 配置里没有的项(仪器预设多测的,如删掉的Q):仅展示读数,不参与判定——
+            # 以前"沿用仪器判定"会让仪器预设里的Fail拖累总判定
+            lo_val = lo_display if isinstance(lo_display, (int, float)) else None
+            hi_val = hi_display if isinstance(hi_display, (int, float)) else None
+            if lo_val is not None or hi_val is not None:
+                result = "Pass"
+                if lo_val is not None and value_display < lo_val:
+                    result = "Fail"
+                if hi_val is not None and value_display > hi_val:
+                    result = "Fail"
+            elif configured:
+                result = "Pass"   # 配置了但没设限值:展示且不判失败
+            else:
+                result = "NA"     # 未配置项:仅展示,不计入判定
+
             items.append(
                 {
                     **item,
+                    "result": result,
                     "unit": unit,
                     "value_display": value_display,
-                    "lo_display": lo_display if isinstance(lo_display, (int, float)) else None,
-                    "hi_display": hi_display if isinstance(hi_display, (int, float)) else None,
+                    "lo_display": lo_val,
+                    "hi_display": hi_val,
                     "symbol": symbol or None,
                 }
             )
@@ -251,6 +313,10 @@ class TestRunner:
         a_key = str(eq_cfg.get("l_raw", "A")).strip().upper() or "A"
         b_key = str(eq_cfg.get("lk_raw", "B")).strip().upper() or "B"
         c_key = str(eq_cfg.get("l_aux", "C")).strip().upper() or "C"
+        n_lower = eq_cfg.get("n_lower")
+        n_upper = eq_cfg.get("n_upper")
+        n_lo = float(n_lower) if isinstance(n_lower, (int, float)) else None
+        n_hi = float(n_upper) if isinstance(n_upper, (int, float)) else None
         if enable_eq_n and all(k in symbols for k in (a_key, b_key, c_key)):
             try:
                 numerator = symbols[a_key] - symbols[b_key]
@@ -261,18 +327,23 @@ class TestRunner:
                 if ratio < 0:
                     raise ValueError("sqrt_arg_negative")
                 neq = math.sqrt(ratio)
+                n_result = "Pass"
+                if n_lo is not None and neq < n_lo:
+                    n_result = "Fail"
+                if n_hi is not None and neq > n_hi:
+                    n_result = "Fail"
                 items.append(
                     {
                         "type": "EqN",
                         "pins": "-",
                         "value": neq,
-                        "lo": 0.0,
-                        "hi": 0.0,
-                        "result": "Pass",
+                        "lo": n_lo or 0.0,
+                        "hi": n_hi or 0.0,
+                        "result": n_result,
                         "unit": "",
                         "value_display": neq,
-                        "lo_display": None,
-                        "hi_display": None,
+                        "lo_display": n_lo,
+                        "hi_display": n_hi,
                         "symbol": "N",
                     }
                 )
@@ -295,8 +366,9 @@ class TestRunner:
                 )
 
 
+        # NA(未配置仅展示)不参与判定计数
         passed = sum(1 for i in items if i["result"] == "Pass")
-        failed = len(items) - passed
+        failed = sum(1 for i in items if i["result"] == "Fail")
         self._emit(f"??????? {passed}/{len(items)}??? {failed}")
 
 
