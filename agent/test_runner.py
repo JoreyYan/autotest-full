@@ -172,6 +172,11 @@ class TestRunner:
                 t, p = it.get('test_type'), it.get('pins')
                 if t and p:
                     pin_map.setdefault(t, []).append(p)
+            # 可选覆盖：产品 JSON 里 uc2910_scan_order = {类型: [引脚按仪器实际扫描顺序]}
+            # 用于仪器设置文件的扫描顺序与测试项定义顺序不一致时显式对位
+            for t, order in (self.product.get('uc2910_scan_order') or {}).items():
+                if isinstance(order, list) and order:
+                    pin_map[t] = [str(x) for x in order]
             self._instr.set_pin_map(pin_map)
 
         # 步骤2：确认IDN
