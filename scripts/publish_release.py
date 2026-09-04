@@ -33,13 +33,30 @@ CLEAN_CONFIG = {
 }
 
 
+def _retry(fn, what, tries=6, base=5):
+    """本地到 open.feishu.cn 的链路时常 SSL EOF/超时,每一步都重试而不是整包重来"""
+    import time as _t
+    last = None
+    for i in range(tries):
+        try:
+            return fn()
+        except (requests.exceptions.RequestException, AssertionError, ValueError) as e:
+            last = e
+            wait = base * (i + 1)
+            print(f'  {what} 失败({type(e).__name__}: {str(e)[:80]}),{wait}s 后重试 {i + 1}/{tries}')
+            _t.sleep(wait)
+    raise last
+
+
 def get_token() -> str:
     cfg = json.loads((RELEASE / 'feishu_config.json').read_text(encoding='utf-8'))
-    r = requests.post(f'{API}/auth/v3/tenant_access_token/internal',
-                      json={'app_id': cfg['app_id'], 'app_secret': cfg['app_secret']}, timeout=15)
-    d = r.json()
-    assert d.get('code') == 0, d
-    return d['tenant_access_token']
+    def _go():
+        r = requests.post(f'{API}/auth/v3/tenant_access_token/internal',
+                          json={'app_id': cfg['app_id'], 'app_secret': cfg['app_secret']}, timeout=30)
+        d = r.json()
+        assert d.get('code') == 0, d
+        return d['tenant_access_token']
+    return _retry(_go, '取token')
 
 
 def build_zip(version: str) -> bytes:
@@ -64,38 +81,50 @@ def build_zip(version: str) -> bytes:
 def upload_to_feishu(token: str, name: str, data: bytes) -> str:
     H = {'Authorization': f'Bearer {token}'}
     size = len(data)
-    r = requests.post(f'{API}/drive/v1/medias/upload_prepare', headers=H, json={
-        'file_name': name, 'parent_type': 'bitable_file', 'parent_node': BASE_TOKEN, 'size': size,
-    }, timeout=30).json()
-    assert r.get('code') == 0, r
+    def _prep():
+        r = requests.post(f'{API}/drive/v1/medias/upload_prepare', headers=H, json={
+            'file_name': name, 'parent_type': 'bitable_file', 'parent_node': BASE_TOKEN, 'size': size,
+        }, timeout=60).json()
+        assert r.get('code') == 0, r
+        return r
+    r = _retry(_prep, 'upload_prepare')
     upload_id = r['data']['upload_id']
     block_size = r['data']['block_size']
     block_num = r['data']['block_num']
     print(f'分片上传: {block_num} 片 x {block_size // 1024 // 1024}MB')
     for seq in range(block_num):
         chunk = data[seq * block_size:(seq + 1) * block_size]
-        rr = requests.post(f'{API}/drive/v1/medias/upload_part', headers=H,
-                           data={'upload_id': upload_id, 'seq': seq, 'size': len(chunk)},
-                           files={'file': chunk}, timeout=300).json()
-        assert rr.get('code') == 0, rr
+        def _part(seq=seq, chunk=chunk):
+            rr = requests.post(f'{API}/drive/v1/medias/upload_part', headers=H,
+                               data={'upload_id': upload_id, 'seq': seq, 'size': len(chunk)},
+                               files={'file': chunk}, timeout=300).json()
+            assert rr.get('code') == 0, rr
+            return rr
+        _retry(_part, f'片 {seq + 1}/{block_num}')
         print(f'  片 {seq + 1}/{block_num} OK')
-    r2 = requests.post(f'{API}/drive/v1/medias/upload_finish', headers=H,
-                       json={'upload_id': upload_id, 'block_num': block_num}, timeout=60).json()
-    assert r2.get('code') == 0, r2
+    def _fin():
+        r2 = requests.post(f'{API}/drive/v1/medias/upload_finish', headers=H,
+                           json={'upload_id': upload_id, 'block_num': block_num}, timeout=120).json()
+        assert r2.get('code') == 0, r2
+        return r2
+    r2 = _retry(_fin, 'upload_finish')
     return r2['data']['file_token']
 
 
 def create_record(token: str, version: str, notes: str, file_token: str, file_name: str, size: int):
     import time
     H = {'Authorization': f'Bearer {token}'}
-    r = requests.post(f'{API}/bitable/v1/apps/{BASE_TOKEN}/tables/{RELEASE_TABLE}/records',
-                      headers=H, json={'fields': {
-                          '版本号': version,
-                          '说明': notes,
-                          '安装包': [{'file_token': file_token}],
-                          '发布时间': int(time.time() * 1000),
-                      }}, timeout=30).json()
-    assert r.get('code') == 0, r
+    def _rec():
+        r = requests.post(f'{API}/bitable/v1/apps/{BASE_TOKEN}/tables/{RELEASE_TABLE}/records',
+                          headers=H, json={'fields': {
+                              '版本号': version,
+                              '说明': notes,
+                              '安装包': [{'file_token': file_token}],
+                              '发布时间': int(time.time() * 1000),
+                          }}, timeout=60).json()
+        assert r.get('code') == 0, r
+        return r
+    r = _retry(_rec, '建版本记录')
     print('版本记录已创建:', r['data']['record']['record_id'])
 
 
