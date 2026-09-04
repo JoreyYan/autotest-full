@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 import threading
 import time
 from datetime import datetime
@@ -55,6 +56,23 @@ COMMON_PREFIX_FIELDS = [
 COMMON_SUFFIX_FIELDS = [
     {'field_name': '产品结果', 'type': FIELD_SINGLE_SELECT,
      'property': {'options': [{'name': 'PASS'}, {'name': 'FAIL'}]}},
+    {'field_name': '扣偏校验ID', 'type': FIELD_TEXT},
+]
+
+# 扣偏校验(金样)记录表
+CAL_TABLE_NAME = '_扣偏校验记录'
+CAL_TABLE_FIELDS = [
+    {'field_name': '校验时间', 'type': FIELD_DATETIME},
+    {'field_name': '校验ID', 'type': FIELD_TEXT},
+    {'field_name': '工位ID', 'type': FIELD_TEXT},
+    {'field_name': '公司', 'type': FIELD_TEXT},
+    {'field_name': '产线', 'type': FIELD_TEXT},
+    {'field_name': '工段', 'type': FIELD_TEXT},
+    {'field_name': '产品', 'type': FIELD_TEXT},
+    {'field_name': '结果', 'type': FIELD_SINGLE_SELECT,
+     'property': {'options': [{'name': '通过'}, {'name': '未通过'}]}},
+    {'field_name': '容差%', 'type': FIELD_NUMBER, 'property': dict(NUMBER_FIELD_PROPERTY)},
+    {'field_name': '明细', 'type': FIELD_TEXT},
 ]
 
 # 产品配置同步表
@@ -82,6 +100,33 @@ def _flatten_text(v) -> str:
                 out.append(str(seg))
         return ''.join(out)
     return str(v)
+
+
+def _resolve_record_number(serial_id: str):
+    """扫码序列码(飞书分享页token)反查序号:ERP 标签库映射优先;分享页解析兜底。"""
+    try:
+        r0 = requests.get('https://www.soaipower.com/api/erp/production/resolve-serial',
+                          params={'token': serial_id}, timeout=6)
+        d0 = r0.json()
+        if d0.get('ok') and d0.get('number'):
+            return str(d0['number'])
+    except Exception:
+        pass
+    try:
+        r = requests.get(f'https://smartonep.feishu.cn/record/{serial_id}',
+                         headers={'User-Agent': 'Mozilla/5.0'}, timeout=6)
+        m = re.search(r'window\.SERVER_DATA\.shareRecord\s*=\s*Object\((\{.*?\})\);', r.text, re.DOTALL)
+        if not m:
+            return None
+        data = json.loads(m.group(1))
+        rs = json.loads(data.get('RecordShare', '{}'))
+        pk = rs.get('primaryKey')
+        v = (rs.get('recordData') or {}).get(pk, {}).get('value')
+        if isinstance(v, list) and v and isinstance(v[0], dict):
+            return v[0].get('number') or v[0].get('text') or v[0].get('sequence')
+        return str(v) if v is not None else None
+    except Exception:
+        return None
 
 
 def _item_label(item: dict) -> str:
@@ -344,6 +389,7 @@ class FeishuUploader:
             '磁芯编号': record_dict.get('core_number', '') or '',
             '产品': record_dict.get('product_code', '') or '',
             '产品结果': record_dict.get('overall', '') or '',
+            '扣偏校验ID': record_dict.get('calibration_id', '') or '',
         }
 
         for it in items:
@@ -370,8 +416,21 @@ class FeishuUploader:
         )
 
     def push_async(self, record_dict: dict):
-        """非阻塞推送，失败入队等重试。"""
-        threading.Thread(target=self._push_with_retry, args=(record_dict,), daemon=True).start()
+        """非阻塞推送，失败入队等重试。
+        推送前兜底解析序号:序号为空但有序列码(扫码token)时,反查飞书分享页拿序号带上——
+        从源头保证测试表序号列有值,ERP不再依赖事后补全(海外服务器爬分享页常失败)。"""
+        def _run():
+            try:
+                sid = str(record_dict.get('serial_code') or '')
+                if not record_dict.get('record_number') and len(sid) > 15 and sid.isalnum():
+                    num = _resolve_record_number(sid)
+                    if num:
+                        record_dict['record_number'] = num
+                        log(f'序号已解析并随记录上传: {num}')
+            except Exception:
+                pass
+            self._push_with_retry(record_dict)
+        threading.Thread(target=_run, daemon=True).start()
 
     def _push_with_retry(self, record_dict: dict):
         # _api 本身已包含网络层重试(5次 backoff) + token 重试(1次)
@@ -500,6 +559,57 @@ class FeishuUploader:
         mapping['__config__'] = {'table_id': table_id}
         self._save_mapping(mapping)
         return table_id
+
+    def _ensure_cal_table(self) -> str:
+        """扣偏校验记录表：不存在则建，存在缺字段则补。"""
+        mapping = self._load_mapping()
+        entry = mapping.get('__calibration__')
+        if entry and entry.get('table_id'):
+            return entry['table_id']
+        table_id = self._find_table_by_name(CAL_TABLE_NAME)
+        if not table_id:
+            result = self._api('POST', f'/bitable/v1/apps/{self.app_token}/tables', json={
+                'table': {'name': CAL_TABLE_NAME}
+            })
+            table_id = result['table_id']
+            log(f'飞书自动建扣偏校验表: {CAL_TABLE_NAME} -> {table_id}')
+        existing = self._list_existing_field_names(table_id)
+        for f in CAL_TABLE_FIELDS:
+            if f['field_name'] not in existing:
+                self._add_field(table_id, f)
+        mapping['__calibration__'] = {'table_id': table_id}
+        self._save_mapping(mapping)
+        return table_id
+
+    def push_calibration(self, cal: dict):
+        """异步推送一条扣偏校验记录（成败都记）。失败只记日志，不入重试队列。"""
+        def _do():
+            try:
+                table_id = self._ensure_cal_table()
+                detail = cal.get('detail') or []
+                lines = []
+                for d in detail:
+                    err = d.get('error_pct')
+                    lines.append(f"{d.get('test_type')} {d.get('pins')}: 标准{d.get('standard')} 实测{d.get('measured')} "
+                                 f"误差{err if err is not None else '?'}% {'OK' if d.get('ok') else 'NG'}")
+                fields = {
+                    '校验时间': int(time.time() * 1000),
+                    '校验ID': cal.get('id', '') or '',
+                    '工位ID': cal.get('deployment_id', '') or '',
+                    '公司': cal.get('company', '') or '',
+                    '产线': cal.get('line', '') or '',
+                    '工段': cal.get('station', '') or '',
+                    '产品': cal.get('product_code', '') or '',
+                    '结果': '通过' if cal.get('passed') else '未通过',
+                    '容差%': float(cal.get('tolerance_pct') or 0),
+                    '明细': '\n'.join(lines),
+                }
+                self._api('POST', f'/bitable/v1/apps/{self.app_token}/tables/{table_id}/records',
+                          json={'fields': fields})
+                log(f"扣偏校验记录已推飞书: {cal.get('id')} {'通过' if cal.get('passed') else '未通过'}")
+            except Exception as e:
+                log(f'扣偏校验记录推送失败(不阻断): {e}', 'WARN')
+        threading.Thread(target=_do, daemon=True).start()
 
     def _list_records(self, table_id: str) -> list[dict]:
         records: list[dict] = []

@@ -226,6 +226,97 @@ function extractSerialCode(raw: string): string {
   return trimmed;
 }
 
+/** 扣偏校验(金样)标签页:控制台→扣偏校验→测试 流水线的中间环节。 */
+function CalibrationPanel({ cal, onRefetch, onPassed }: {
+  cal: { enabled: boolean; tolerance_pct: number; passed: boolean; checked_at: string | null; detail: import("@/lib/api").CalibrationRow[]; id?: string | null } | undefined;
+  onRefetch: () => void;
+  onPassed: () => void;
+}) {
+  const [showGuide, setShowGuide] = useState(false);
+  const calMutation = useMutation({
+    mutationFn: api.calibrationRun,
+    onSuccess: (d) => {
+      onRefetch();
+      if (d.passed) window.setTimeout(onPassed, 1500);
+    },
+  });
+  const tol = cal?.tolerance_pct ?? 0.5;
+  const passed = Boolean(cal?.passed);
+  const detail = calMutation.data?.detail ?? cal?.detail ?? [];
+
+  return (
+    <div className="space-y-4">
+      <div className={`rounded-lg border p-4 ${passed ? "bg-emerald-50 border-emerald-300" : "bg-amber-50 border-amber-300"}`}>
+        <div className={`text-lg font-bold ${passed ? "text-emerald-700" : "text-amber-700"}`}>
+          {passed ? `校验已通过 ✓  ${cal?.checked_at || ""}` : "校验未通过 — 正式测试已锁定"}
+        </div>
+        {passed && cal?.id ? (
+          <div className="text-xs text-muted-foreground mt-1 mono">校验ID：{cal.id}（本次校验后的测试记录都会带上此ID）</div>
+        ) : null}
+        {passed && calMutation.data?.passed && (
+          <div className="text-sm text-emerald-700 mt-1">即将自动进入「测试」…</div>
+        )}
+      </div>
+
+      <div className="rounded-lg border p-4 text-sm space-y-1.5">
+        <div className="font-semibold mb-1">操作规程（阈值 ±{tol}%）</div>
+        <div>① 仪器面板进入「偏差扣除」设置页：总开关 ON，需要扣除的项逐个打 ON（√）</div>
+        <div>② 选好后返回测量显示页面</div>
+        <div>③ 把<b>标准磁芯</b>放上夹具，按仪器实体 <b>TRIGGER</b> 键执行一次偏差扣除</div>
+        <div>④ 标准磁芯保持在夹具上，点击下方「扣偏校验测试」——软件测量并与标称值比对</div>
+        <div>⑤ 全部误差 ≤{tol}% 即通过，自动进入测试；不通过可重新扣除后再校验，不限次数</div>
+      </div>
+
+      <div className="flex items-center gap-3 flex-wrap">
+        <Button size="lg" disabled={calMutation.isPending} onClick={() => calMutation.mutate()}>
+          {calMutation.isPending ? "校验中..." : "扣偏校验测试"}
+        </Button>
+        <Button variant="outline" onClick={() => setShowGuide(v => !v)}>
+          {showGuide ? "收起图文教程" : "查看图文教程"}
+        </Button>
+        <a href="/guide/uc2866xb-offset.html" target="_blank" rel="noreferrer"
+          className="text-sm text-muted-foreground underline">新窗口打开教程</a>
+      </div>
+
+      {calMutation.error ? (
+        <div className="rounded-lg border p-3 text-sm bg-rose-50 border-rose-200 text-rose-700">
+          {(calMutation.error as Error).message}
+        </div>
+      ) : null}
+
+      {detail.length > 0 && (
+        <table className="text-sm w-full">
+          <thead>
+            <tr className="text-muted-foreground text-xs">
+              <th className="text-left pr-3 py-1">项目</th>
+              <th className="text-right pr-3">标准值</th>
+              <th className="text-right pr-3">实测</th>
+              <th className="text-right pr-3">误差%</th>
+              <th className="text-center">判定</th>
+            </tr>
+          </thead>
+          <tbody>
+            {detail.map((r, i) => (
+              <tr key={i} className="border-t">
+                <td className="pr-3 py-1 mono">{r.test_type} {r.pins}</td>
+                <td className="text-right pr-3 mono">{r.standard ?? "-"}</td>
+                <td className="text-right pr-3 mono">{r.measured != null ? Number(r.measured).toFixed(5) : "-"}</td>
+                <td className={`text-right pr-3 mono ${r.ok ? "text-emerald-600" : "text-rose-600 font-bold"}`}>{r.error_pct ?? "-"}</td>
+                <td className={`text-center font-bold ${r.ok ? "text-emerald-600" : "text-rose-600"}`}>{r.ok ? "OK" : "NG"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {showGuide && (
+        <iframe src="/guide/uc2866xb-offset.html" title="UC2866XB 偏差扣除操作说明"
+          className="w-full rounded-lg border" style={{ height: "76vh" }} />
+      )}
+    </div>
+  );
+}
+
 export default function TestPage() {
   const [activeTab, setActiveTab] = useState("console");
   const [selectedProduct, setSelectedProduct] = useState<string>("");
@@ -241,13 +332,14 @@ export default function TestPage() {
     localStorage.setItem("resultFontScale", v);
   };
   const [scannerMode, setScannerMode] = useState(true); // 默认扫码枪模式
+  const [scanHint, setScanHint] = useState(""); // 扫码后的识别提示(识别中/失败原因)
   const [lastScanCode, setLastScanCode] = useState("");
   const [lastRecordNumber, setLastRecordNumber] = useState<string | null>(null);
   const [lastScanUrl, setLastScanUrl] = useState("");
   const [manualRecordNumber, setManualRecordNumber] = useState("");
   const [manualCoreNumber, setManualCoreNumber] = useState("");
 
-  const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.getProducts });
+  const { data: products = [] } = useQuery({ queryKey: ["products"], queryFn: api.getProducts, refetchInterval: 15000 });
   const { data: status, refetch: refetchStatus } = useQuery({
     queryKey: ["status"],
     queryFn: api.getStatus,
@@ -262,6 +354,7 @@ export default function TestPage() {
     queryKey: ["product-detail", selectedProduct],
     queryFn: () => api.getProduct(selectedProduct),
     enabled: Boolean(selectedProduct),
+    refetchInterval: 15000,
   });
 
   const fixtureProducts = useMemo(
@@ -295,12 +388,33 @@ export default function TestPage() {
       setLogs([]);
       setLogCursor(0);
     },
-    onSuccess: () => refetchStatus(),
+    onSuccess: async (data) => {
+      refetchStatus();
+      // 初始化成功:启用扣偏校验的产品自动进入「扣偏校验」标签,否则直接去「测试」
+      if (data?.ok) {
+        try {
+          const cal = await api.calibrationStatus();
+          setActiveTab(cal.enabled && !cal.passed ? "calibration" : "test");
+        } catch {
+          setActiveTab("test");
+        }
+      }
+    },
   });
 
   const disconnectMutation = useMutation({ mutationFn: api.disconnect, onSuccess: () => refetchStatus() });
 
   const isReady = Boolean(status?.ready && status?.product_code === selectedProduct);
+
+  // 扣偏校验(金样):启用了 golden_sample 的产品,校验通过前不允许正式测试
+  const calQuery = useQuery({
+    queryKey: ["calibration", selectedProduct, isReady],
+    queryFn: api.calibrationStatus,
+    enabled: isReady,
+    refetchInterval: 30000,
+  });
+  const calEnabled = Boolean(calQuery.data?.enabled);
+  const calPassed = Boolean(calQuery.data?.passed);
 
   const testMutation = useMutation({
     mutationFn: (params?: { serialCode?: string; recordNumber?: string; coreNumber?: string }) => api.runTest(params),
@@ -328,29 +442,52 @@ export default function TestPage() {
       const reqCore = Boolean(productDetail?.require_core_number);
       const recVal = manualRecordNumber.trim();
       const coreVal = manualCoreNumber.trim();
-      if (reqRec && !recVal) {
-        console.warn('[scanner] 序号必填但未填，本次扫码忽略');
+      const isFeishuLabel = rawUrl.includes("feishu.cn/record/");
+      // 序号必填:没手填但扫的是标签二维码 → 先识别序号再测;既没手填又不是标签 → 提示
+      if (reqRec && !recVal && !isFeishuLabel) {
+        console.warn('[scanner] 序号必填但未填，且扫的不是标签二维码');
+        setScanHint("序号必填：请扫产品标签二维码，或先手动填序号再扫");
         return;
       }
       if (reqCore && !coreVal) {
         console.warn('[scanner] 磁芯编号必填但未填，本次扫码忽略');
+        setScanHint("磁芯编号必填，请先填磁芯编号");
         return;
       }
 
-      setLastScanCode(code);
-      setLastRecordNumber(recVal || null);
-      setLastScanUrl(rawUrl);
-      if (!testMutation.isPending) {
-        testMutation.mutate({ serialCode: code, recordNumber: recVal, coreNumber: coreVal });
+      if (calEnabled && !calPassed) {
+        console.warn('[scanner] 扣偏校验未通过，扫码测试忽略');
+        setScanHint("扣偏校验未通过，请先完成扣偏校验");
+        return;
       }
-      // 仅当用户没手动填序号时才异步查飞书
-      if (!recVal && rawUrl.includes("feishu.cn/record/")) {
-        api.getFeishuRecordNumber(rawUrl).then((res) => {
-          if (res.ok && res.record_number !== null) {
-            setLastRecordNumber(String(res.record_number));
-          }
-        }).catch(() => {});
+      const run = (recNum: string) => {
+        setScanHint("");
+        setLastScanCode(code);
+        setLastRecordNumber(recNum || null);
+        setLastScanUrl(rawUrl);
+        if (!testMutation.isPending) {
+          testMutation.mutate({ serialCode: code, recordNumber: recNum, coreNumber: coreVal });
+        }
+      };
+      if (recVal || !isFeishuLabel) {
+        run(recVal);
+        return;
       }
+      // 没手填序号:向 ERP 查标签对应的序号(飞书分享页已需登录,软件后端会先问 ERP 再兜底爬页)
+      setScanHint("正在识别标签序号…");
+      api.getFeishuRecordNumber(rawUrl).then((res) => {
+        const num = res.ok && res.record_number != null ? String(res.record_number) : "";
+        if (num) {
+          run(num);
+        } else if (reqRec) {
+          setScanHint(`标签未识别（${res.message || "标签库里没有这个序列码"}），请手动填序号后重扫`);
+        } else {
+          run("");
+        }
+      }).catch(() => {
+        if (reqRec) setScanHint("序号识别失败（网络），请手动填序号后重扫");
+        else run("");
+      });
     }
 
     function handleKeyDown(e: KeyboardEvent) {
@@ -440,7 +577,8 @@ export default function TestPage() {
 
   const overall = useMemo(() => {
     if (!lastResult) return "-";
-    return lastResult.items.some((x) => x.result !== "Pass") ? "FAIL" : "PASS";
+    // NA(未配置仅展示)不算失败,与后端判定一致
+    return lastResult.items.some((x) => x.result === "Fail") ? "FAIL" : "PASS";
   }, [lastResult]);
 
   const statusBadge = (
@@ -455,8 +593,13 @@ export default function TestPage() {
   return (
     <div className="space-y-6">
       <Tabs value={activeTab} onValueChange={setActiveTab}>
-        <TabsList className="grid w-full grid-cols-4">
+        <TabsList className={`grid w-full ${calEnabled ? "grid-cols-5" : "grid-cols-4"}`}>
           <TabsTrigger value="console">控制台</TabsTrigger>
+          {calEnabled && (
+            <TabsTrigger value="calibration" className={!calPassed ? "text-amber-600 data-[state=active]:text-amber-700" : ""}>
+              扣偏校验{calPassed ? " ✓" : " ⚠"}
+            </TabsTrigger>
+          )}
           <TabsTrigger value="test">测试</TabsTrigger>
           <TabsTrigger value="files">最近文件</TabsTrigger>
           <TabsTrigger value="logs">日志</TabsTrigger>
@@ -482,7 +625,7 @@ export default function TestPage() {
                       <SelectContent>
                         {fixtureProducts.map((p) => (
                           <SelectItem key={p.product_code} value={p.product_code}>
-                            {p.product_code} - {p.product_name}
+                            {p.product_code} - {p.product_name}{p.config_version ? ` (配置v${p.config_version})` : ""}
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -521,7 +664,10 @@ export default function TestPage() {
                   <div className="rounded-lg border p-3 bg-secondary">
                     <div className="text-xs text-muted-foreground">当前产品</div>
                     <div className="mt-1 font-semibold">{selectedProduct || "未选择"}</div>
-                    <div className="text-xs text-muted-foreground">{selectedName || "-"}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {selectedName || "-"}
+                      {status?.config_version ? <span className="ml-2 text-primary font-medium">运行中配置 v{status.config_version}</span> : null}
+                    </div>
                   </div>
                   <div className="rounded-lg border p-3 bg-secondary">
                     <div className="text-xs text-muted-foreground">仪器端口</div>
@@ -558,6 +704,31 @@ export default function TestPage() {
           </div>
         </TabsContent>
 
+        {calEnabled && (
+          <TabsContent value="calibration" className="mt-4">
+            <Card className="panel">
+              <CardHeader>
+                <CardTitle className="flex items-center justify-between flex-wrap gap-2">
+                  <span>扣偏校验（金样）</span>
+                  {status?.config_version ? (
+                    <span className="text-xs font-normal text-muted-foreground">{status?.product_code} · 配置 v{status.config_version}</span>
+                  ) : null}
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {!isReady ? (
+                  <div className="rounded-lg border bg-amber-50 border-amber-300 text-amber-800 p-4 text-sm">
+                    仪器尚未初始化。请先到「控制台」完成初始化，再进行扣偏校验。
+                  </div>
+                ) : (
+                  <CalibrationPanel cal={calQuery.data} onRefetch={() => calQuery.refetch()}
+                    onPassed={() => setActiveTab("test")} />
+                )}
+              </CardContent>
+            </Card>
+          </TabsContent>
+        )}
+
         <TabsContent value="test" className="space-y-4 mt-4">
           <Card className="panel">
             <CardHeader>
@@ -569,7 +740,7 @@ export default function TestPage() {
                     (() => {
                       const reqRec = productDetail?.require_record_number !== false;
                       const reqCore = Boolean(productDetail?.require_core_number);
-                      const recOk = !reqRec || manualRecordNumber.trim().length > 0;
+                      const recOk = true; // 扫码枪模式:序号由标签二维码自动识别,不要求先手填
                       const coreOk = !reqCore || manualCoreNumber.trim().length > 0;
                       const ready = isReady && recOk && coreOk;
                       let badgeText: string;
@@ -577,7 +748,7 @@ export default function TestPage() {
                       else if (!isReady) badgeText = "未就绪";
                       else if (!recOk) badgeText = "请先填序号";
                       else if (!coreOk) badgeText = "请先填磁芯编号";
-                      else badgeText = "等待扫码...";
+                      else badgeText = scanHint || "等待扫码（自动识别序号）...";
                       return (
                         <>
                           {reqRec && (
@@ -610,7 +781,7 @@ export default function TestPage() {
                       const reqCore = Boolean(productDetail?.require_core_number);
                       const recOk = !reqRec || manualRecordNumber.trim().length > 0;
                       const coreOk = !reqCore || manualCoreNumber.trim().length > 0;
-                      const canRun = isReady && !testMutation.isPending && recOk && coreOk;
+                      const canRun = isReady && !testMutation.isPending && recOk && coreOk && (!calEnabled || calPassed);
                       return (
                         <>
                           {reqRec && (
@@ -652,6 +823,20 @@ export default function TestPage() {
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-4">
+              {isReady && calEnabled && (
+                <div className={`rounded-lg border p-3 text-sm flex items-center gap-3 flex-wrap ${calPassed ? "bg-emerald-50 border-emerald-200" : "bg-amber-50 border-amber-300"}`}>
+                  <span className={`font-bold ${calPassed ? "text-emerald-700" : "text-amber-700"}`}>
+                    {calPassed ? `扣偏校验已通过 ✓ ${calQuery.data?.checked_at || ""}` : "⚠ 扣偏校验未通过 — 正式测试已锁定"}
+                  </span>
+                  {calPassed && calQuery.data?.id ? (
+                    <span className="text-xs text-muted-foreground mono">校验ID：{calQuery.data.id}</span>
+                  ) : null}
+                  <Button size="sm" className="ml-auto" variant={calPassed ? "outline" : "default"}
+                    onClick={() => setActiveTab("calibration")}>
+                    {calPassed ? "重新校验" : "前往扣偏校验"}
+                  </Button>
+                </div>
+              )}
               {lastScanCode && (
                 <div className="rounded-lg border p-3 text-sm bg-blue-50 border-blue-200 text-blue-700 flex items-center gap-4">
                   <div><span className="font-medium">序列码：</span><span className="mono">{lastScanCode}</span></div>
@@ -702,14 +887,17 @@ export default function TestPage() {
                           {matrixTypes.map((type) => {
                             const cell = matrix.get(`${pins}::${type}`);
                             if (!cell) return <TableCell key={`${pins}-${type}`} className="text-center text-muted-foreground">-</TableCell>;
-                            const fail = cell.result !== "Pass";
+                            const isNA = cell.result === "NA";   // 配置外的项(仪器多测的):仅展示读数,不参与判定
+                            const fail = !isNA && cell.result !== "Pass";
                             const cfg = (productDetail?.test_items ?? []).find((x) => x.pins === pins && x.test_type === type);
                             const lowText = limitText(cfg?.lower_limit ?? cell.lo_display ?? null, cfg?.unit ?? cell.unit ?? null);
                             const highText = limitText(cfg?.upper_limit ?? cell.hi_display ?? null, cfg?.unit ?? cell.unit ?? null);
                             return (
-                              <TableCell key={`${pins}-${type}`} className={`text-center mono ${fail ? "bg-rose-50 text-rose-700 font-semibold" : "text-foreground"}`}>
+                              <TableCell key={`${pins}-${type}`} className={`text-center mono ${fail ? "bg-rose-50 text-rose-700 font-semibold" : isNA ? "text-muted-foreground" : "text-foreground"}`}>
                                 <div>{formatDisplayValue(cell, cfg?.unit ?? null)}</div>
-                                {(showLimits || fail) && <div className="text-[0.55em] font-normal leading-snug text-muted-foreground">{lowText} ~ {highText}</div>}
+                                {isNA
+                                  ? <div className="text-[0.55em] font-normal leading-snug text-muted-foreground">仅展示·不判定</div>
+                                  : (showLimits || fail) && <div className="text-[0.55em] font-normal leading-snug text-muted-foreground">{lowText} ~ {highText}</div>}
                               </TableCell>
                             );
                           })}

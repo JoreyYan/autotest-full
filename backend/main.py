@@ -18,7 +18,7 @@ from .csv_writer import save
 from .inspection_csv_writer import save as save_inspection
 from .feishu_uploader import get_uploader
 
-APP_VERSION = '1.7.3'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
+APP_VERSION = '1.7.4'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
 
 app = FastAPI(title='变压器测试系统', version=APP_VERSION)
 
@@ -837,11 +837,30 @@ def patch_record_number(req: PatchRecordNumberRequest):
         raise HTTPException(500, str(e))
 
 
+ERP_RESOLVE_URL = 'https://www.soaipower.com/api/erp/production/resolve-serial'
+
+
+def _resolve_via_erp(url_or_token: str, timeout=6):
+    """先问 ERP:ERP 用标签库映射直接答序号(飞书分享页 2026-09 起要登录,匿名爬不到)。"""
+    import requests as req
+    try:
+        r = req.get(ERP_RESOLVE_URL, params={'token': url_or_token}, timeout=timeout)
+        d = r.json()
+        if d.get('ok') and d.get('number'):
+            return str(d['number']), ''
+        return None, str(d.get('error') or '')
+    except Exception as e:
+        return None, str(e)
+
+
 @app.get('/api/feishu/record-number')
 def get_feishu_record_number(url: str):
-    """从飞书记录二维码链接获取序号"""
+    """从飞书记录二维码链接获取序号:ERP 标签库映射优先,分享页兜底"""
     import requests as req
     import re
+    num, err = _resolve_via_erp(url)
+    if num:
+        return {'ok': True, 'record_number': num, 'source': 'erp'}
     try:
         r = req.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
         match = re.search(
@@ -849,7 +868,8 @@ def get_feishu_record_number(url: str):
             r.text, re.DOTALL
         )
         if not match:
-            return {'ok': False, 'record_number': None, 'message': '未找到记录数据'}
+            return {'ok': False, 'record_number': None,
+                    'message': err or '标签库里没有这个序列码,分享页也读不到'}
         data = json.loads(match.group(1))
         record_share = json.loads(data.get('RecordShare', '{}'))
         record_data = record_share.get('recordData', {})
