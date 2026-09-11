@@ -14,6 +14,7 @@ import threading
 
 from . import state
 from . import logs
+from . import serial_code
 from .csv_writer import save
 from .inspection_csv_writer import save as save_inspection
 from .feishu_uploader import get_uploader
@@ -377,6 +378,15 @@ def run_test(req: RunTestRequest = RunTestRequest()):
     record.record_number = req.record_number
     record.core_number = req.core_number
 
+    # 磁芯编号为空时自动发一个全局唯一流水码（4位起，工位内递增）
+    if not (record.core_number or '').strip():
+        code, err = serial_code.next_code()
+        if code:
+            record.core_number = code
+            logs.log(f'已分配流水码 {code}')
+        else:
+            logs.log(f'流水码分配失败（本次无编号）: {err}', 'WARN')
+
     # 保存CSV
     csv_file = save(record, state.get_results_dir())
     logs.log(f'测试完成：{record.overall}，结果保存 {csv_file}')
@@ -649,6 +659,24 @@ def gap_calc(req: GapCalcRequest):
     if r.status_code != 200:
         raise HTTPException(502, data.get('error') or '气隙计算失败')
     return data
+
+
+@app.get('/api/serial-code/status')
+def serial_code_status():
+    """流水码号段状态（下一个码、剩余量、容量）。"""
+    return serial_code.status()
+
+
+@app.post('/api/serial-code/peek')
+def serial_code_peek():
+    """领取/确认号段，返回下一个将要发出的码（不消耗号）。"""
+    st = serial_code.status()
+    if not st['has_block']:
+        err = serial_code._ensure_block()
+        if err:
+            raise HTTPException(400, err)
+        st = serial_code.status()
+    return st
 
 
 @app.get('/api/update/check')

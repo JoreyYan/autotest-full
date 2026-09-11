@@ -631,6 +631,22 @@ class FeishuUploader:
     DEPLOY_TABLE = 'tblWq5o4RzT9A4rk'   # _工位
     PARAM_TABLE = 'tblly75fVtVGiram'    # _产品参数
     RELEASE_TABLE = 'tbltEfMJtSFPU3mO'  # _软件版本（自动更新通道）
+    CODE_BLOCK_TABLE = 'tblVe0jsiWcMnLmB'  # _编码段（流水码号段分配）
+
+    def list_code_blocks(self) -> list[dict]:
+        """读 _编码段 表所有记录的 fields，用于算下一段起点。"""
+        return [r.get('fields') or {} for r in self._list_records(self.CODE_BLOCK_TABLE)]
+
+    def create_code_block(self, deployment_id: str, start: int, end: int, sample: str):
+        """登记本工位领取的号段。"""
+        self._api('POST', f'/bitable/v1/apps/{self.app_token}/tables/{self.CODE_BLOCK_TABLE}/records',
+                  json={'fields': {
+                      '工位ID': deployment_id,
+                      '段起': start,
+                      '段止': end,
+                      '示例码': sample,
+                      '分配时间': int(time.time() * 1000),
+                  }})
 
     def fetch_latest_release(self) -> Optional[dict]:
         """读 _软件版本 表，返回版本号最大的一行：
