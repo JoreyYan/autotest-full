@@ -1,6 +1,7 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { api, type TestResult, type MeasuredItem, type InitStatus, type LogItem } from "@/lib/api";
+import { parseFinishedCode } from "@/lib/finishedCode";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -435,7 +436,9 @@ export default function TestPage() {
 
     function triggerScan(raw: string) {
       const rawUrl = raw.trim();
-      const code = extractSerialCode(rawUrl);
+      // 新成品码(铝壳二维码 soaipower.com/t/<9位码> 或裸码):码本身就是序号,序列码留空,不走飞书序号识别
+      const finishedCode = parseFinishedCode(rawUrl);
+      const code = finishedCode ? "" : extractSerialCode(rawUrl);
 
       // 扫码模式下也尊重产品配置的必填项
       const reqRec = productDetail?.require_record_number !== false;
@@ -443,8 +446,8 @@ export default function TestPage() {
       const recVal = manualRecordNumber.trim();
       const coreVal = manualCoreNumber.trim();
       const isFeishuLabel = rawUrl.includes("feishu.cn/record/");
-      // 序号必填:没手填但扫的是标签二维码 → 先识别序号再测;既没手填又不是标签 → 提示
-      if (reqRec && !recVal && !isFeishuLabel) {
+      // 序号必填:没手填但扫的是标签二维码/新成品码 → 自动拿序号再测;既没手填又不是标签 → 提示
+      if (reqRec && !recVal && !isFeishuLabel && !finishedCode) {
         console.warn('[scanner] 序号必填但未填，且扫的不是标签二维码');
         setScanHint("序号必填：请扫产品标签二维码，或先手动填序号再扫");
         return;
@@ -469,6 +472,17 @@ export default function TestPage() {
           testMutation.mutate({ serialCode: code, recordNumber: recNum, coreNumber: coreVal });
         }
       };
+      if (finishedCode) {
+        if (testMutation.isPending) {
+          // 上一台还在测:这次不开测,也不改「最近扫码/序号」,免得把没测的这台显示在上一台结果旁、被补写进上一台的 CSV
+          console.warn('[scanner] 测试进行中，新成品码扫码忽略');
+          setScanHint("上一台还在测，这次扫码未开测，请测完后重扫");
+          return;
+        }
+        // 新成品码:序号 = 该码(以扫到的码为准),直接开测
+        run(finishedCode);
+        return;
+      }
       if (recVal || !isFeishuLabel) {
         run(recVal);
         return;
@@ -525,6 +539,8 @@ export default function TestPage() {
   useEffect(() => {
     if (lastRecordNumber && lastResult?.csv_file && lastResult.csv_file !== patchedCsv) {
       setPatchedCsv(lastResult.csv_file);
+      // 新成品码:后端写 CSV 前已归一化成 9 位大写码,不再补写(补写会用手填原文/链接覆盖掉归一化后的序号)
+      if (parseFinishedCode(lastRecordNumber)) return;
       api.patchRecordNumber(lastResult.csv_file, lastRecordNumber).catch(() => {});
     }
   }, [lastRecordNumber, lastResult?.csv_file]);
@@ -837,9 +853,12 @@ export default function TestPage() {
                   </Button>
                 </div>
               )}
-              {lastScanCode && (
+              {(lastScanCode || lastScanUrl) && (
                 <div className="rounded-lg border p-3 text-sm bg-blue-50 border-blue-200 text-blue-700 flex items-center gap-4">
-                  <div><span className="font-medium">序列码：</span><span className="mono">{lastScanCode}</span></div>
+                  {/* 新成品码没有序列码,只显示序号 */}
+                  {lastScanCode && (
+                    <div><span className="font-medium">序列码：</span><span className="mono">{lastScanCode}</span></div>
+                  )}
                   {lastRecordNumber !== null && (
                     <div><span className="font-medium">序号：</span><span className="mono text-lg font-bold">{lastRecordNumber}</span></div>
                   )}

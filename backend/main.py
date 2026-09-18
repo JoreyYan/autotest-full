@@ -14,12 +14,13 @@ import threading
 
 from . import state
 from . import logs
-from . import serial_code
+from . import cloud_uploader
 from .csv_writer import save
 from .inspection_csv_writer import save as save_inspection
 from .feishu_uploader import get_uploader
+from .finished_code import parse_finished_code
 
-APP_VERSION = '1.7.4'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
+APP_VERSION = '1.7.5'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
 
 app = FastAPI(title='变压器测试系统', version=APP_VERSION)
 
@@ -64,6 +65,20 @@ def _startup_feishu_uploader():
         threading.Thread(target=_auto_update_check_loop, daemon=True, name='update-check').start()
     except Exception as e:
         logs.log(f'更新检查启动失败: {e}', 'WARN', sticky=True)
+
+
+@app.on_event('startup')
+def _startup_cloud_uploader():
+    """新码直推上传线程：与飞书无关，不看飞书凭证，启动即拉起，积压的待传自动补推。"""
+    try:
+        up = cloud_uploader.start(app_version=APP_VERSION)
+        n = up.pending_count()
+        if n > 0:
+            logs.log(f'新码直推已就绪，发现 {n} 条待传，后台线程开始补推', sticky=True)
+        else:
+            logs.log('新码直推已就绪，无待传', sticky=True)
+    except Exception as e:
+        logs.log(f'新码直推上传线程启动失败: {e}', 'ERROR', sticky=True)
 
 
 @app.get('/api/version')
@@ -378,39 +393,68 @@ def run_test(req: RunTestRequest = RunTestRequest()):
     record.record_number = req.record_number
     record.core_number = req.core_number
 
-    # 磁芯编号为空时自动发一个全局唯一流水码（4位起，工位内递增）
-    if not (record.core_number or '').strip():
-        code, err = serial_code.next_code()
-        if code:
-            record.core_number = code
-            logs.log(f'已分配流水码 {code}')
-        else:
-            logs.log(f'流水码分配失败（本次无编号）: {err}', 'WARN')
+    # 新码(铝壳成品码)编号归一化：序号框里是新码 → 序号取 9 位大写码；
+    # 否则序列码里是新码（前端旧流程把扫到的整段文字当序列码传上来）→ 移到序号、序列码清空。其余原样不动
+    finished_code = parse_finished_code(req.record_number)
+    if finished_code:
+        record.record_number = finished_code
+    else:
+        finished_code = parse_finished_code(req.serial_code)
+        if finished_code:
+            record.record_number = finished_code
+            record.serial_code = ''
 
     # 保存CSV
     csv_file = save(record, state.get_results_dir())
     logs.log(f'测试完成：{record.overall}，结果保存 {csv_file}')
 
-    # 飞书异步推送（无凭证时静默跳过；失败入队后台重试）
     dep = state.get_deployment()
-    uploader = get_uploader(Path.cwd())
-    if uploader:
-        uploader.push_async({
-            'timestamp': record.timestamp,
-            'product_code': record.product_code,
-            'serial_code': record.serial_code,
-            'record_number': record.record_number,
-            'core_number': record.core_number,
-            'overall': record.overall,
-            'passed': record.passed,
-            'failed': record.failed,
-            'items': record.items,
-            'company': dep.get('company', ''),
-            'line': dep.get('line', ''),
-            'station': dep.get('station', ''),
-            'deployment_id': dep.get('deployment_id', ''),
-            'calibration_id': state.calibration.get('id') or '',
-        })
+    if parse_finished_code(record.record_number):
+        # 新码记录直推 SOAI 云端：先落盘本地队列(fsync)再由后台线程发送，不推飞书、不依赖飞书凭证
+        try:
+            upload_id = cloud_uploader.enqueue({
+                'timestamp': record.timestamp,
+                'product_code': record.product_code,
+                'serial_code': record.serial_code,
+                'record_number': record.record_number,
+                'core_number': record.core_number,
+                'overall': record.overall,
+                'items': record.items,
+                'company': dep.get('company', ''),
+                'line': dep.get('line', ''),
+                'station': dep.get('station', ''),
+                'deployment_id': dep.get('deployment_id', ''),
+                'calibration_id': state.calibration.get('id') or '',
+            })
+            logs.log(f'新码 {record.record_number} 已写入直推队列（{upload_id[:8]}）')
+        # 写不进也照常返回测试结果：前端不显示 run_test 的报错，抛错会让屏幕停在上一台的结果上；
+        # 用不会被清掉的 ERROR 日志提醒（直推状态 last_error 里也能看到）
+        except cloud_uploader.NotPersistedError as e:
+            logs.log(f'新码 {record.record_number} 直推队列写不进磁盘，已暂存内存、磁盘恢复后自动补写；'
+                     f'补写前关闭软件这条不会上传云端（本地CSV已保存）: {e}', 'ERROR', sticky=True)
+        except Exception as e:
+            logs.log(f'新码 {record.record_number} 写入直推队列失败，这条不会上传云端（本地CSV已保存）: {e}',
+                     'ERROR', sticky=True)
+    else:
+        # 飞书异步推送（无凭证时静默跳过；失败入队后台重试）
+        uploader = get_uploader(Path.cwd())
+        if uploader:
+            uploader.push_async({
+                'timestamp': record.timestamp,
+                'product_code': record.product_code,
+                'serial_code': record.serial_code,
+                'record_number': record.record_number,
+                'core_number': record.core_number,
+                'overall': record.overall,
+                'passed': record.passed,
+                'failed': record.failed,
+                'items': record.items,
+                'company': dep.get('company', ''),
+                'line': dep.get('line', ''),
+                'station': dep.get('station', ''),
+                'deployment_id': dep.get('deployment_id', ''),
+                'calibration_id': state.calibration.get('id') or '',
+            })
 
     return TestResult(
         ok=True,
@@ -661,24 +705,6 @@ def gap_calc(req: GapCalcRequest):
     return data
 
 
-@app.get('/api/serial-code/status')
-def serial_code_status():
-    """流水码号段状态（下一个码、剩余量、容量）。"""
-    return serial_code.status()
-
-
-@app.post('/api/serial-code/peek')
-def serial_code_peek():
-    """领取/确认号段，返回下一个将要发出的码（不消耗号）。"""
-    st = serial_code.status()
-    if not st['has_block']:
-        err = serial_code._ensure_block()
-        if err:
-            raise HTTPException(400, err)
-        st = serial_code.status()
-    return st
-
-
 @app.get('/api/update/check')
 def update_check():
     r = _check_update()
@@ -911,6 +937,19 @@ def get_feishu_record_number(url: str):
         return {'ok': True, 'record_number': record_number}
     except Exception as e:
         return {'ok': False, 'record_number': None, 'message': str(e)}
+
+
+@app.get('/api/cloud-upload/status')
+def cloud_upload_status():
+    """新码直推状态：{url, pending, rejected, last_ok_at, last_error, running}"""
+    return cloud_uploader.status()
+
+
+@app.post('/api/cloud-upload/retry')
+def cloud_upload_retry():
+    """手动重试：只唤醒直推线程，不阻塞等待结果。"""
+    cloud_uploader.trigger()
+    return {'ok': True, 'triggered': True, 'pending': cloud_uploader.get_cloud_uploader().pending_count()}
 
 
 @app.get('/api/logs')

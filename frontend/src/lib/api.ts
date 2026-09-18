@@ -23,6 +23,8 @@ export interface Product {
   require_core_number?: boolean;
   test_items_count?: number;
   inspection_steps_count?: number;
+  config_version?: number;   // ERP下发配置版本(_version)
+  _version?: number;
 }
 
 export type ProductBody = Omit<Product, "test_items_count">;
@@ -84,6 +86,7 @@ export interface SystemStatus {
   ready: boolean;
   product_code: string | null;
   port: string;
+  config_version?: number | null;
 }
 
 export interface InspectionStatus {
@@ -193,6 +196,21 @@ async function request<T>(url: string, options?: RequestInit): Promise<T> {
   return res.json();
 }
 
+export interface CalibrationRow {
+  test_type: string; pins: string; standard: number | null;
+  measured: number | null; error_pct: number | null; ok: boolean;
+}
+
+// 新码直推云端(v1.7.5):本地队列状态
+export interface CloudUploadStatus {
+  url: string;
+  pending: number;
+  rejected: number;
+  last_ok_at: string | number | null;   // 时间字符串或时间戳,显示时统一格式化
+  last_error: string | null;
+  running: boolean;
+}
+
 export const api = {
   getProducts: () => request<Product[]>("/products"),
   getProduct: (code: string) => request<Product>(`/products/${code}`),
@@ -224,6 +242,9 @@ export const api = {
       }),
     }),
   disconnect: () => request<void>("/disconnect", { method: "POST" }),
+  // 扣偏校验(金样):状态查询 + 触发一次校验测量
+  calibrationStatus: () => request<{ enabled: boolean; tolerance_pct: number; passed: boolean; checked_at: string | null; detail: CalibrationRow[]; id?: string | null; ready?: boolean; product_code?: string | null }>("/calibration/status"),
+  calibrationRun: () => request<{ ok: boolean; passed: boolean; tolerance_pct: number; checked_at: string; detail: CalibrationRow[]; id?: string }>("/calibration/run", { method: "POST" }),
   getResults: () => request<CsvResult[]>("/results"),
   getLogs: (since = 0) => request<LogResponse>(`/logs?since=${since}`),
   patchRecordNumber: (csvFile: string, recordNumber: string) =>
@@ -235,6 +256,7 @@ export const api = {
     request<{ ok: boolean; record_number: string | null; message?: string }>(
       `/feishu/record-number?url=${encodeURIComponent(url)}`
     ),
+  getCloudUploadStatus: () => request<CloudUploadStatus>("/cloud-upload/status"),
   uploadConfig: () =>
     request<{ ok: boolean; created: number; updated: number; failed: number; total_local: number }>(
       "/config/upload",

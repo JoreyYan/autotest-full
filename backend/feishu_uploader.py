@@ -149,6 +149,29 @@ def _is_finite(v) -> bool:
     return not (math.isnan(x) or math.isinf(x))
 
 
+def record_time_ms(ts_str) -> Optional[int]:
+    """测试时间 'YYYY-mm-dd HH:MM:SS'（本机时区）→ 毫秒时间戳；解析失败返回 None。
+    飞书「测试时间」与新码直推 test_time_ms 共用，保证两边一致。"""
+    try:
+        return int(datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S').timestamp() * 1000)
+    except Exception:
+        return None
+
+
+def item_values(items) -> dict:
+    """测试项 → {字段名: 数值}。飞书产品表测试项列与新码直推 items 共用，改这里两边一起变。
+    取 value_display，不是有限数就退回 value，仍不是就跳过；NA 项照样包含。"""
+    out: dict = {}
+    for it in items or []:
+        label = _item_label(it)
+        v = it.get('value_display')
+        if not _is_finite(v):
+            v = it.get('value')
+        if _is_finite(v):
+            out[label] = float(v)
+    return out
+
+
 class FeishuUploader:
     def __init__(self, app_id: str, app_secret: str, app_token: str, work_dir: Path):
         self.app_id = app_id
@@ -374,9 +397,8 @@ class FeishuUploader:
     def _build_fields(self, record_dict: dict) -> dict:
         items = record_dict.get('items') or []
         ts_str = record_dict.get('timestamp', '')
-        try:
-            ts_ms = int(datetime.strptime(ts_str, '%Y-%m-%d %H:%M:%S').timestamp() * 1000)
-        except Exception:
+        ts_ms = record_time_ms(ts_str)
+        if ts_ms is None:
             ts_ms = int(time.time() * 1000)
 
         fields: dict = {
@@ -392,13 +414,8 @@ class FeishuUploader:
             '扣偏校验ID': record_dict.get('calibration_id', '') or '',
         }
 
-        for it in items:
-            label = _item_label(it)
-            v = it.get('value_display')
-            if not _is_finite(v):
-                v = it.get('value')
-            if _is_finite(v):
-                fields[label] = float(v)
+        # 测试项列（与新码直推共用 item_values，逐项写入顺序与覆盖规则不变）
+        fields.update(item_values(items))
 
         return fields
 
@@ -631,22 +648,6 @@ class FeishuUploader:
     DEPLOY_TABLE = 'tblWq5o4RzT9A4rk'   # _工位
     PARAM_TABLE = 'tblly75fVtVGiram'    # _产品参数
     RELEASE_TABLE = 'tbltEfMJtSFPU3mO'  # _软件版本（自动更新通道）
-    CODE_BLOCK_TABLE = 'tblVe0jsiWcMnLmB'  # _编码段（流水码号段分配）
-
-    def list_code_blocks(self) -> list[dict]:
-        """读 _编码段 表所有记录的 fields，用于算下一段起点。"""
-        return [r.get('fields') or {} for r in self._list_records(self.CODE_BLOCK_TABLE)]
-
-    def create_code_block(self, deployment_id: str, start: int, end: int, sample: str):
-        """登记本工位领取的号段。"""
-        self._api('POST', f'/bitable/v1/apps/{self.app_token}/tables/{self.CODE_BLOCK_TABLE}/records',
-                  json={'fields': {
-                      '工位ID': deployment_id,
-                      '段起': start,
-                      '段止': end,
-                      '示例码': sample,
-                      '分配时间': int(time.time() * 1000),
-                  }})
 
     def fetch_latest_release(self) -> Optional[dict]:
         """读 _软件版本 表，返回版本号最大的一行：

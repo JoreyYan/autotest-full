@@ -12,6 +12,17 @@ __pycache__/
 results/
 *.log
 
+# Feishu credentials & state (NEVER commit)
+feishu_config.json
+feishu_pending.jsonl
+feishu_table_mapping.json
+feishu_pending.processing
+# v1.7.5 新码直推本地队列
+cloud_pending.jsonl
+cloud_pending_fallback.jsonl
+cloud_rejected.jsonl
+.env
+
 # IDE/system
 .vscode/
 .DS_Store

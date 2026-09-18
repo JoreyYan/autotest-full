@@ -72,24 +72,6 @@ def save_deployment(deployment_id: str, company: str, line: str, station: str):
     _save_config(cfg)
 
 
-def get_code_state() -> dict:
-    """本机流水码号段进度（未领号段时各字段为 None）。"""
-    cfg = _load_config()
-    return {
-        'code_block_start': cfg.get('code_block_start'),
-        'code_block_end': cfg.get('code_block_end'),
-        'code_next': cfg.get('code_next'),
-    }
-
-
-def save_code_state(block_start: int, block_end: int, next_seq: int | None = None):
-    cfg = _load_config()
-    cfg['code_block_start'] = block_start
-    cfg['code_block_end'] = block_end
-    cfg['code_next'] = block_start if next_seq is None else next_seq
-    _save_config(cfg)
-
-
 def _load_config() -> dict:
     p = Path('config.json')
     if p.exists():
