@@ -370,6 +370,13 @@ def calibration_run():
             'checked_at': state.calibration['checked_at'], 'id': cal_id}
 
 
+def _upload_to_erp() -> bool:
+    """本工位当前产品规格里 upload_channel == 'erp' → 所有测试记录直推 ERP、不经飞书。
+    在 ERP「工位参数下发」按工位勾选,随规格自动同步下来;取消勾选就回到飞书,随时可退。"""
+    prod = getattr(state.runner, 'product', None) or {}
+    return str(prod.get('upload_channel') or '').strip().lower() == 'erp'
+
+
 @app.post('/api/test/run')
 def run_test(req: RunTestRequest = RunTestRequest()):
     """
@@ -409,8 +416,20 @@ def run_test(req: RunTestRequest = RunTestRequest()):
     logs.log(f'测试完成：{record.overall}，结果保存 {csv_file}')
 
     dep = state.get_deployment()
-    if parse_finished_code(record.record_number):
-        # 新码记录直推 SOAI 云端：先落盘本地队列(fsync)再由后台线程发送，不推飞书、不依赖飞书凭证
+    is_new = bool(parse_finished_code(record.record_number))
+    if is_new or _upload_to_erp():
+        # 直推 SOAI 云端(ERP)：新码一律直推；规格里 upload_channel=erp 的工位，旧码/只有磁芯号的记录也直推。
+        # 先落盘本地队列(fsync)再由后台线程发送，不推飞书、不依赖飞书凭证
+        if not is_new and not record.record_number and record.serial_code:
+            # 飞书推送线程会顺手反查序号;直推这里只查本机缓存、不等网络,查不到由 ERP「补全序号」补
+            try:
+                from . import record_number_cache
+                num = record_number_cache.peek(record.serial_code)
+                if num:
+                    record.record_number = num
+            except Exception:
+                pass
+        tag = f"{'新码' if is_new else '记录'} {record.record_number or record.serial_code or record.core_number or '-'}"
         try:
             upload_id = cloud_uploader.enqueue({
                 'timestamp': record.timestamp,
@@ -426,14 +445,14 @@ def run_test(req: RunTestRequest = RunTestRequest()):
                 'deployment_id': dep.get('deployment_id', ''),
                 'calibration_id': state.calibration.get('id') or '',
             })
-            logs.log(f'新码 {record.record_number} 已写入直推队列（{upload_id[:8]}）')
+            logs.log(f'{tag} 已写入直推队列（{upload_id[:8]}）')
         # 写不进也照常返回测试结果：前端不显示 run_test 的报错，抛错会让屏幕停在上一台的结果上；
         # 用不会被清掉的 ERROR 日志提醒（直推状态 last_error 里也能看到）
         except cloud_uploader.NotPersistedError as e:
-            logs.log(f'新码 {record.record_number} 直推队列写不进磁盘，已暂存内存、磁盘恢复后自动补写；'
+            logs.log(f'{tag} 直推队列写不进磁盘，已暂存内存、磁盘恢复后自动补写；'
                      f'补写前关闭软件这条不会上传云端（本地CSV已保存）: {e}', 'ERROR', sticky=True)
         except Exception as e:
-            logs.log(f'新码 {record.record_number} 写入直推队列失败，这条不会上传云端（本地CSV已保存）: {e}',
+            logs.log(f'{tag} 写入直推队列失败，这条不会上传云端（本地CSV已保存）: {e}',
                      'ERROR', sticky=True)
     else:
         # 飞书异步推送（无凭证时静默跳过；失败入队后台重试）

@@ -130,6 +130,16 @@ def resolve(url_or_token: str) -> tuple[Optional[str], str, str]:
     return num, err, src
 
 
+def peek(url_or_token: str) -> Optional[str]:
+    """只查本机正向缓存、不发网络请求;没有就返回 None(直推测试记录时用,不能让测试等网络)"""
+    key = _key(url_or_token)
+    if not key:
+        return None
+    with _lock:
+        _load()
+        return _pos.get(key)
+
+
 def cached_count() -> int:
     with _lock:
         _load()

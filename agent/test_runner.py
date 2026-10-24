@@ -277,7 +277,8 @@ class TestRunner:
             cfg = config_map.get(key, {})
             unit = _normalize_unit(cfg.get("unit"))
             value_display = _convert_si_to_display(float(item["value"]), unit)
-            symbol = str(cfg.get("symbol", "")).strip().upper()
+            # symbol 为 None 时当作没有符号(旧写法 str(None) 会变成 "NONE")
+            symbol = str(cfg.get("symbol") or "").strip().upper()
             if symbol:
                 symbols[symbol] = value_display
             lo_display = cfg.get("lower_limit")
@@ -311,8 +312,35 @@ class TestRunner:
                 }
             )
 
-        # ???????n = sqrt((A - B) / C)?????(???)??
-        # ???????n = sqrt((A - B) / C)????????????????
+        # 缺项:规格里配了、仪器这次没返回的测试项,以前直接没有这一项、不影响判定(可能误判合格)。
+        # 现在补一条不合格的占位项,界面显示 ERR(缺项),整台判不合格;数据照常保存上传。
+        # (2026-10-23 核对:各工位规格更新后的正常记录 2400+ 条没有一条缺项,不会误伤正常生产)
+        measured = {(it["type"], it["pins"]) for it in raw_items}
+        for (t, p2), cfg in config_map.items():
+            if (t, p2) in measured:
+                continue
+            lo_m, hi_m = cfg.get("lower_limit"), cfg.get("upper_limit")
+            items.append(
+                {
+                    "type": t,
+                    "pins": p2,
+                    "value": float("nan"),
+                    "lo": 0.0,
+                    "hi": 0.0,
+                    "result": "Fail",
+                    "unit": _normalize_unit(cfg.get("unit")),
+                    "value_display": float("nan"),
+                    "lo_display": lo_m if isinstance(lo_m, (int, float)) else None,
+                    "hi_display": hi_m if isinstance(hi_m, (int, float)) else None,
+                    "error": "缺项(仪器没测到)",
+                    "symbol": str(cfg.get("symbol") or "").strip().upper() or None,
+                }
+            )
+            self._emit(f"缺项:{t}_{p2} 规格里有、仪器没测到,本台判不合格")
+
+        # 等效 n = sqrt((A - B) / C),A/B/C 按测试项的符号取实测值。
+        # 开了等效 n 但凑不齐 A/B/C 时不能静默跳过(2026-10-22 汉润磁芯检规格符号全空,
+        # 一下午没有 N 值也没人发现):记一条不合格的等效n,写明缺哪个符号或哪项没测到。
         enable_eq_n = bool(self.product.get("enable_eq_n", False))
         eq_cfg = self.product.get("eq_n_vars") or {}
         a_key = str(eq_cfg.get("l_raw", "A")).strip().upper() or "A"
@@ -322,7 +350,29 @@ class TestRunner:
         n_upper = eq_cfg.get("n_upper")
         n_lo = float(n_lower) if isinstance(n_lower, (int, float)) else None
         n_hi = float(n_upper) if isinstance(n_upper, (int, float)) else None
-        if enable_eq_n and all(k in symbols for k in (a_key, b_key, c_key)):
+        missing_eq = [k for k in (a_key, b_key, c_key) if k not in symbols] if enable_eq_n else []
+        if missing_eq:
+            cfg_sym = {str(c.get("symbol") or "").strip().upper(): f"{t}_{p}"
+                       for (t, p), c in config_map.items()}
+            reasons = [f"{k}({cfg_sym[k]})没测到" if k in cfg_sym else f"规格里没有符号{k}" for k in missing_eq]
+            items.append(
+                {
+                    "type": "EqN",
+                    "pins": "-",
+                    "value": float("nan"),
+                    "lo": 0.0,
+                    "hi": 0.0,
+                    "result": "Fail",
+                    "unit": "",
+                    "value_display": float("nan"),
+                    "lo_display": n_lo,
+                    "hi_display": n_hi,
+                    "error": "缺" + "、".join(reasons),
+                    "symbol": "N",
+                }
+            )
+            self._emit(f"等效n 算不出来:{'、'.join(reasons)},请在 ERP 规格里给测试项标上 A/B/C")
+        elif enable_eq_n:
             try:
                 numerator = symbols[a_key] - symbols[b_key]
                 denominator = symbols[c_key]
@@ -357,7 +407,7 @@ class TestRunner:
                     {
                         "type": "EqN",
                         "pins": "-",
-                        "value": 0.0,
+                        "value": float("nan"),   # 不再记 0.0:上传会被当成实测的 N=0
                         "lo": 0.0,
                         "hi": 0.0,
                         "result": "Fail",
