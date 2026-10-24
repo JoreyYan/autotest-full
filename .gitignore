@@ -67,3 +67,6 @@ record_number_cache.json
 /.agents/
 /.claude/skills/
 /.claude/launch.json
+
+# 磁芯标签脚本默认的预览图目录
+/core_label_preview/

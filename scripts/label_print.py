@@ -44,12 +44,14 @@ def make_code(year: str, gen: str, seq: int) -> str:
     return f'{body}{check_digit(body)}'          # check_digit 返回 int
 
 
-def qr_image(text: str, px: int) -> Image.Image:
-    """按模块整数倍作图，避免缩放糊边导致扫不出。返回黑白正方形图。"""
+def qr_image(text: str, px: int, quiet: int = 4) -> Image.Image:
+    """按模块整数倍作图，避免缩放糊边导致扫不出。返回黑白正方形图。
+
+    quiet：静区格数。成品码标签用默认 4（少于 4 格扫码枪易失败）；45×30 这类小标签
+    二维码周围本来就留白，可以减到 2，换来每格更多点数（core_label_print.py 用）。"""
     w = QrCodeWidget(text)
     w.qr.make()
     modules, n = w.qr.modules, w.qr.getModuleCount()
-    quiet = 4                                              # 静区，少于 4 格扫码枪易失败
     scale = max(1, px // (n + quiet * 2))
     size = (n + quiet * 2) * scale
     img = Image.new('1', (size, size), 1)
