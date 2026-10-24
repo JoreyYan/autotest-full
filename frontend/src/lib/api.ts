@@ -21,6 +21,10 @@ export interface Product {
   };
   require_record_number?: boolean;
   require_core_number?: boolean;
+  /** 磁芯编号必填(按模式分开):缺省时回退到 require_core_number。扫码枪模式 */
+  require_core_number_scan?: boolean;
+  /** 磁芯编号必填(按模式分开):缺省时回退到 require_core_number。非扫码(手动)模式 */
+  require_core_number_manual?: boolean;
   test_items_count?: number;
   inspection_steps_count?: number;
   config_version?: number;   // ERP下发配置版本(_version)

@@ -281,14 +281,14 @@ def test_startup_starts_cloud_uploader_without_feishu(tmp_path, monkeypatch):
     main._startup_cloud_uploader()
     up = cu.get_cloud_uploader()
     assert up.status()['running'] is True
-    assert up.app_version == '1.7.5'
+    assert up.app_version == '1.7.6'
     assert any('2 条待传' in m and sticky for _, m, sticky in captured)
 
 
 def test_version_and_serial_code_removed():
-    assert main.APP_VERSION == '1.7.5'
+    assert main.APP_VERSION == '1.7.6'
     client = TestClient(main.app)
-    assert client.get('/api/version').json()['version'] == '1.7.5'
+    assert client.get('/api/version').json()['version'] == '1.7.6'
     paths = {getattr(r, 'path', '') for r in main.app.routes}
     assert '/api/cloud-upload/status' in paths and '/api/cloud-upload/retry' in paths
     assert not any(p.startswith('/api/serial-code') for p in paths)

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import queue
 import re
 import threading
 import time
@@ -103,28 +104,11 @@ def _flatten_text(v) -> str:
 
 
 def _resolve_record_number(serial_id: str):
-    """扫码序列码(飞书分享页token)反查序号:ERP 标签库映射优先;分享页解析兜底。"""
+    """扫码序列码(飞书分享页token)反查序号:本地缓存 → ERP 标签库映射 → 分享页兜底。"""
     try:
-        r0 = requests.get('https://www.soaipower.com/api/erp/production/resolve-serial',
-                          params={'token': serial_id}, timeout=6)
-        d0 = r0.json()
-        if d0.get('ok') and d0.get('number'):
-            return str(d0['number'])
-    except Exception:
-        pass
-    try:
-        r = requests.get(f'https://smartonep.feishu.cn/record/{serial_id}',
-                         headers={'User-Agent': 'Mozilla/5.0'}, timeout=6)
-        m = re.search(r'window\.SERVER_DATA\.shareRecord\s*=\s*Object\((\{.*?\})\);', r.text, re.DOTALL)
-        if not m:
-            return None
-        data = json.loads(m.group(1))
-        rs = json.loads(data.get('RecordShare', '{}'))
-        pk = rs.get('primaryKey')
-        v = (rs.get('recordData') or {}).get(pk, {}).get('value')
-        if isinstance(v, list) and v and isinstance(v[0], dict):
-            return v[0].get('number') or v[0].get('text') or v[0].get('sequence')
-        return str(v) if v is not None else None
+        from .record_number_cache import resolve
+        num, _err, _src = resolve(serial_id)
+        return num
     except Exception:
         return None
 
@@ -185,6 +169,8 @@ class FeishuUploader:
         self._token_lock = threading.Lock()
         self._queue_lock = threading.Lock()
         self._retry_thread: Optional[threading.Thread] = None
+        self._push_queue: queue.Queue[dict] = queue.Queue()   # 待推送记录(内存队列,单线程消费)
+        self._push_thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         # 复用 HTTPS 连接，减少 SSL 握手抖动
         from requests.adapters import HTTPAdapter
@@ -433,10 +419,25 @@ class FeishuUploader:
         )
 
     def push_async(self, record_dict: dict):
-        """非阻塞推送，失败入队等重试。
-        推送前兜底解析序号:序号为空但有序列码(扫码token)时,反查飞书分享页拿序号带上——
-        从源头保证测试表序号列有值,ERP不再依赖事后补全(海外服务器爬分享页常失败)。"""
-        def _run():
+        """非阻塞推送：入内存队列由单线程按序发送。
+        旧实现每扫一码开一个新线程，网络慢/飞书故障时线程越积越多、
+        共享连接池被占死，整个后端随时间变慢。现在固定一个消费线程，
+        推送前兜底解析序号(序号为空但有序列码时反查,带本地缓存)。"""
+        self._push_queue.put(record_dict)
+        self._ensure_push_worker()
+
+    def _ensure_push_worker(self):
+        if self._push_thread and self._push_thread.is_alive():
+            return
+        self._push_thread = threading.Thread(target=self._push_loop, daemon=True, name='feishu-push')
+        self._push_thread.start()
+
+    def _push_loop(self):
+        while not self._stop.is_set():
+            try:
+                record_dict = self._push_queue.get(timeout=1.0)
+            except queue.Empty:
+                continue
             try:
                 sid = str(record_dict.get('serial_code') or '')
                 if not record_dict.get('record_number') and len(sid) > 15 and sid.isalnum():
@@ -447,7 +448,6 @@ class FeishuUploader:
             except Exception:
                 pass
             self._push_with_retry(record_dict)
-        threading.Thread(target=_run, daemon=True).start()
 
     def _push_with_retry(self, record_dict: dict):
         # _api 本身已包含网络层重试(5次 backoff) + token 重试(1次)

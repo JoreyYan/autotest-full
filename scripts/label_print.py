@@ -73,7 +73,7 @@ def _font(size: int) -> ImageFont.FreeTypeFont:
 
 def label(code: str, w_mm: float = 72.0, h_mm: float = 130.0, prefix: str = URL_PREFIX) -> Image.Image:
     """竖版标签：二维码在上、序号在下。标签上只印序号，不印网址（业主 2026-09-17 确认）。"""
-    W, H = int(w_mm * MM), int(h_mm * MM)
+    W, H = int(w_mm * MM) // 8 * 8, int(h_mm * MM)     # 宽度取 8 的整数倍且不超过标签宽，见 bitmap_bytes
     img = Image.new('1', (W, H), 1)
     d = ImageDraw.Draw(img)
     pad = int(5 * MM)
@@ -87,11 +87,15 @@ def label(code: str, w_mm: float = 72.0, h_mm: float = 130.0, prefix: str = URL_
 
 
 def bitmap_bytes(img: Image.Image) -> tuple[int, int, bytes]:
-    """TSPL BITMAP 数据：每行按字节对齐（右侧补白），位 0 = 打黑点，位 1 = 不打。"""
+    """TSPL BITMAP 数据：位 0 = 打黑点，位 1 = 不打。
+
+    每行宽度**向下**取 8 的整数倍，绝不补白加宽：一旦位图每行比 SIZE 指定的标签宽度多出
+    哪怕 1 个点，打印机会把多出的点折到下一行，整张图逐行错位——文字勉强能认，二维码直接
+    变成横条纹。实测 70mm 标签(559 点)发 560 点宽的位图就是这个现象。
+    """
     img = img.convert('1')
-    w_bytes = (img.width + 7) // 8
-    padded = Image.new('1', (w_bytes * 8, img.height), 1)
-    padded.paste(img, (0, 0))
+    w_bytes = img.width // 8
+    padded = img.crop((0, 0, w_bytes * 8, img.height))
     px = padded.load()
     out = bytearray()
     for y in range(padded.height):
@@ -103,17 +107,33 @@ def bitmap_bytes(img: Image.Image) -> tuple[int, int, bytes]:
     return w_bytes, padded.height, bytes(out)
 
 
-def tspl_job(img: Image.Image, w_mm: float, h_mm: float) -> bytes:
-    """一张标签的完整 TSPL 作业。PRINT 1,1 = 打一张，绝不多走纸。"""
+def qrcode_cmd(x_dots: int, y_dots: int, text: str, cell: int = 7, ecc: str = 'M') -> bytes:
+    """让打印机自己画二维码。
+
+    这台机器打位图二维码会整行漏印（打成横条纹、扫不出来），而同一张标签上用 QRCODE 指令
+    画的干净——所以二维码一律走这条路，位图只放文字。内容限不含引号的 ASCII。
+    """
+    if any(ord(c) > 127 or c == '"' for c in text):
+        raise ValueError(f'二维码内容必须是不含引号的 ASCII: {text!r}')
+    return f'QRCODE {x_dots},{y_dots},{ecc},{cell},A,0,"{text}"\r\n'.encode('ascii')
+
+
+def tspl_job(img: Image.Image, w_mm: float, h_mm: float, density: int = 12, speed: int = 2,
+             extra: bytes = b'') -> bytes:
+    """一张标签的完整 TSPL 作业。PRINT 1,1 = 打一张，绝不多走纸。
+
+    密度 12 / 速度 2：走纸快、浓度低时黑块容易漏印，慢一点、深一点最稳。
+    extra：跟在位图之后、PRINT 之前的指令，二维码用 qrcode_cmd() 生成。
+    """
     w_bytes, rows, data = bitmap_bytes(img)
     head = (f'SIZE {w_mm:g} mm,{h_mm:g} mm\r\n'
             'GAP 2 mm,0 mm\r\n'
             'DIRECTION 1\r\n'
-            'DENSITY 10\r\n'
-            'SPEED 4\r\n'
+            f'DENSITY {density}\r\n'
+            f'SPEED {speed}\r\n'
             'CLS\r\n'
             f'BITMAP 0,0,{w_bytes},{rows},0,').encode('ascii')
-    return head + data + b'\r\nPRINT 1,1\r\n'
+    return head + data + b'\r\n' + extra + b'PRINT 1,1\r\n'
 
 
 def send_raw(data: bytes, title: str, printer: str = PRINTER) -> None:

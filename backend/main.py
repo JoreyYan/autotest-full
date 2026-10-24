@@ -20,7 +20,7 @@ from .inspection_csv_writer import save as save_inspection
 from .feishu_uploader import get_uploader
 from .finished_code import parse_finished_code
 
-APP_VERSION = '1.7.5'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
+APP_VERSION = '1.7.6'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
 
 app = FastAPI(title='变压器测试系统', version=APP_VERSION)
 
@@ -909,34 +909,12 @@ def _resolve_via_erp(url_or_token: str, timeout=6):
 
 @app.get('/api/feishu/record-number')
 def get_feishu_record_number(url: str):
-    """从飞书记录二维码链接获取序号:ERP 标签库映射优先,分享页兜底"""
-    import requests as req
-    import re
-    num, err = _resolve_via_erp(url)
+    """从飞书记录二维码链接获取序号:本地缓存 → ERP 标签库映射 → 分享页兜底"""
+    from . import record_number_cache
+    num, err, source = record_number_cache.resolve(url)
     if num:
-        return {'ok': True, 'record_number': num, 'source': 'erp'}
-    try:
-        r = req.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
-        match = re.search(
-            r'window\.SERVER_DATA\.shareRecord\s*=\s*Object\((\{.*?\})\);',
-            r.text, re.DOTALL
-        )
-        if not match:
-            return {'ok': False, 'record_number': None,
-                    'message': err or '标签库里没有这个序列码,分享页也读不到'}
-        data = json.loads(match.group(1))
-        record_share = json.loads(data.get('RecordShare', '{}'))
-        record_data = record_share.get('recordData', {})
-        primary_key = record_share.get('primaryKey')
-        value = record_data.get(primary_key, {}).get('value')
-        # value 是列表如 [{"number": "2602N0118", "sequence": "118"}]
-        if isinstance(value, list) and len(value) > 0 and isinstance(value[0], dict):
-            record_number = value[0].get('number', value[0].get('sequence', str(value[0])))
-        else:
-            record_number = str(value) if value is not None else None
-        return {'ok': True, 'record_number': record_number}
-    except Exception as e:
-        return {'ok': False, 'record_number': None, 'message': str(e)}
+        return {'ok': True, 'record_number': num, 'source': source}
+    return {'ok': False, 'record_number': None, 'message': err or '标签库里没有这个序列码'}
 
 
 @app.get('/api/cloud-upload/status')

@@ -341,10 +341,11 @@
       "tolerance_mode": "pm"
     }
   ],
-  "enable_eq_n": true,
+  "enable_eq_n": false,
   "eq_n_vars": {
     "l_raw": "A",
     "lk_raw": "B",
     "l_aux": "C"
-  }
+  },
+  "instrument_driver": "uce"
 }

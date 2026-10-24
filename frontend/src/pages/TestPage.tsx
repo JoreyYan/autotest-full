@@ -1,6 +1,6 @@
 ﻿import { useEffect, useMemo, useState } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
-import { api, type TestResult, type MeasuredItem, type InitStatus, type LogItem } from "@/lib/api";
+import { api, type TestResult, type MeasuredItem, type InitStatus, type LogItem, type Product } from "@/lib/api";
 import { parseFinishedCode } from "@/lib/finishedCode";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -14,6 +14,10 @@ import { Input } from "@/components/ui/input";
 
 /** 气隙研磨计算面板（磁芯检产品专用）：FAIL 磁芯自动带入实测电感，调云端算法给研磨建议。 */
 const GAP_DEFAULTS = { np1: 9, ns1: 3, np2: -6, ns2: -6, n: 1.185, lk: 8.884, lm: 56.866, hgPri: 5.56, hgSec: 1.36, hgFilm: 0.6 };
+
+/** 磁芯编号必填(按模式分开)：下发配置没写对应开关时回退到模板的 require_core_number。 */
+const reqCoreScan = (p?: Product) => p?.require_core_number_scan ?? Boolean(p?.require_core_number);
+const reqCoreManual = (p?: Product) => p?.require_core_number_manual ?? Boolean(p?.require_core_number);
 
 export function GapCalcPanel({ productCode, result }: { productCode: string; result: TestResult | null }) {
   const storeKey = `gapCalc:${productCode}`;
@@ -349,7 +353,7 @@ export default function TestPage() {
   const { data: results = [] } = useQuery({
     queryKey: ["results"],
     queryFn: api.getResults,
-    refetchInterval: 10000,
+    refetchInterval: 30000,
   });
   const { data: productDetail } = useQuery({
     queryKey: ["product-detail", selectedProduct],
@@ -366,7 +370,7 @@ export default function TestPage() {
   const logsQuery = useQuery({
     queryKey: ["logs", logCursor],
     queryFn: () => api.getLogs(logCursor),
-    refetchInterval: 1000,
+    refetchInterval: 2000,
   });
 
   useEffect(() => {
@@ -440,9 +444,9 @@ export default function TestPage() {
       const finishedCode = parseFinishedCode(rawUrl);
       const code = finishedCode ? "" : extractSerialCode(rawUrl);
 
-      // 扫码模式下也尊重产品配置的必填项
+      // 扫码模式下也尊重产品配置的必填项（磁芯编号按扫码模式的开关判定）
       const reqRec = productDetail?.require_record_number !== false;
-      const reqCore = Boolean(productDetail?.require_core_number);
+      const reqCore = reqCoreScan(productDetail);
       const recVal = manualRecordNumber.trim();
       const coreVal = manualCoreNumber.trim();
       const isFeishuLabel = rawUrl.includes("feishu.cn/record/");
@@ -532,7 +536,7 @@ export default function TestPage() {
       window.removeEventListener("keydown", handleKeyDown);
       if (timer) clearTimeout(timer);
     };
-  }, [scannerMode, isReady, testMutation.isPending, productDetail?.require_record_number, productDetail?.require_core_number, manualRecordNumber, manualCoreNumber]);
+  }, [scannerMode, isReady, testMutation.isPending, productDetail?.require_record_number, productDetail?.require_core_number, productDetail?.require_core_number_scan, productDetail?.require_core_number_manual, manualRecordNumber, manualCoreNumber]);
 
   // 序号和CSV都就绪后，补写序号到CSV
   const [patchedCsv, setPatchedCsv] = useState("");
@@ -673,7 +677,15 @@ export default function TestPage() {
                 <div className="flex items-center gap-3">
                   <Switch checked={scannerMode} onCheckedChange={setScannerMode} />
                   <span className="text-sm font-medium">扫码枪模式</span>
-                  <span className="text-xs text-muted-foreground">{scannerMode ? "已开启：扫码即测试，测试按钮隐藏" : "已关闭：手动点击测试按钮"}</span>
+                  <span className="text-xs text-muted-foreground">
+                    {scannerMode ? "已开启：扫码即测试，测试按钮隐藏" : "已关闭：手动点击测试按钮"}
+                  </span>
+                </div>
+                <div className="rounded-lg border p-3 bg-secondary/60 text-xs text-muted-foreground space-y-1">
+                  <div className="font-medium text-foreground">当前模式必填项</div>
+                  <div>· 扫码枪模式：{reqCoreScan(productDetail) ? "磁芯编号【必填】" : "磁芯编号 选填"}（序号由标签二维码自动识别）</div>
+                  <div>· 非扫码(手动)模式：{reqCoreManual(productDetail) ? "磁芯编号【必填】" : "磁芯编号 选填"}{productDetail?.require_record_number !== false ? "、序号【必填】(手动输入)" : "、序号 选填"}</div>
+                  <div className="text-[11px] text-muted-foreground/70">必填项由工位下发的参数控制（扫码/非扫码分开设置），如需调整请在 ERP「工位参数下发」里修改。</div>
                 </div>
 
                 <div className="grid gap-3 md:grid-cols-3 text-sm">
@@ -755,7 +767,7 @@ export default function TestPage() {
                   {scannerMode ? (
                     (() => {
                       const reqRec = productDetail?.require_record_number !== false;
-                      const reqCore = Boolean(productDetail?.require_core_number);
+                      const reqCore = reqCoreScan(productDetail);
                       const recOk = true; // 扫码枪模式:序号由标签二维码自动识别,不要求先手填
                       const coreOk = !reqCore || manualCoreNumber.trim().length > 0;
                       const ready = isReady && recOk && coreOk;
@@ -794,7 +806,7 @@ export default function TestPage() {
                   ) : (
                     (() => {
                       const reqRec = productDetail?.require_record_number !== false; // 默认 true
-                      const reqCore = Boolean(productDetail?.require_core_number);
+                      const reqCore = reqCoreManual(productDetail);
                       const recOk = !reqRec || manualRecordNumber.trim().length > 0;
                       const coreOk = !reqCore || manualCoreNumber.trim().length > 0;
                       const canRun = isReady && !testMutation.isPending && recOk && coreOk && (!calEnabled || calPassed);

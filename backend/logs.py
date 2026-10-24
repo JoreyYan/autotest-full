@@ -11,17 +11,31 @@ _entries: List[Dict] = []
 _next_id = 1
 _log_file: Optional[Path] = None
 
+# 续传/系统日志：不随 start_session 清空，初始化连接后仍可见
+_sticky: List[Dict] = []      # 每项 {ts, level, message}（不含 id）
+_STICKY_CAP = 30
+
 
 def _now() -> str:
     return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
 def start_session(product_code: str, phase: str):
-    """Start a new log file for a session and clear memory buffer."""
+    """Start a new log file for a session and clear memory buffer.
+    续传/系统日志(sticky)会保留并重新打底，不被清空。"""
     global _entries, _next_id, _log_file
     with _lock:
         _entries = []
         _next_id = 1
+        # 用 sticky 日志打底（重新编号），保证初始化后续传日志仍可见
+        for s in _sticky:
+            _entries.append({
+                'id': _next_id,
+                'ts': s['ts'],
+                'level': s['level'],
+                'message': s['message'],
+            })
+            _next_id += 1
         logs_dir = Path('results') / 'logs'
         logs_dir.mkdir(parents=True, exist_ok=True)
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -36,7 +50,9 @@ def _append_to_file(line: str):
         f.write(line + '\n')
 
 
-def log(message: str, level: str = 'INFO'):
+def log(message: str, level: str = 'INFO', sticky: bool = False):
+    """记录一条日志。
+    sticky=True 的日志（续传/系统级）不会被 start_session 清空。"""
     global _next_id
     with _lock:
         entry = {
@@ -47,6 +63,10 @@ def log(message: str, level: str = 'INFO'):
         }
         _entries.append(entry)
         _next_id += 1
+        if sticky:
+            _sticky.append({'ts': entry['ts'], 'level': level, 'message': message})
+            if len(_sticky) > _STICKY_CAP:
+                del _sticky[0]
         _append_to_file(f"[{entry['ts']}] [{level}] {message}")
 
 

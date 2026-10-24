@@ -33,3 +33,37 @@ Thumbs.db
 _tmp_follow_me2/
 frontend_backup_20260308_155355/
 frontend_backup_20260308_155411/
+
+# ── 2026-10-24 整理源码时加:不进仓库的本机文件 ──
+# 运行时缓存(v1.7.6 序号本地缓存)
+record_number_cache.json
+# 含密钥/令牌,绝不提交
+/_setup_supabase.py
+/_sync_feishu_to_supabase.py
+/产线数据集成方案.md
+# 一次性脚本、日志与产线数据
+/_*.py
+/_*.txt
+/_local_sn_map.json
+/sn_to_number_map*.csv
+# 打包产物与发版压缩包
+/build/
+/release/
+/*.7z
+# 临时目录、调试产物
+/artifacts/
+/tmp/
+/.tmp-mps-manual/
+# 另一个项目(UC2866XB 偏差扣除网页,710 MB)
+/扣除偏差-web/
+# 仪器说明书等大文件
+/doc/*.pdf
+/doc/*.pptx
+/仪器/
+# 产品配置本地副本(以 ERP 下发为准;已跟踪的 ZZ-T250005A.json 不受影响)
+/products/INCOMING_SAMPLE_2836.json
+/products/ZZ-H2500011*.json
+# 本机 AI 工具配置
+/.agents/
+/.claude/skills/
+/.claude/launch.json

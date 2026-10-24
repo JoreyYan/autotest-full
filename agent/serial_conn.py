@@ -12,7 +12,7 @@ import time
 IDLE_MS = 300        # 多少ms无新数据视为一包结束
 READ_CHUNK = 4096    # 每次读取字节数
 READ_TIMEOUT = 0.05  # serial read超时（秒）
-UC2866_IDN = 'YouCe Electronics,UC2866XB'
+DEFAULT_IDN_SIGNATURE = 'YouCe Electronics,UC2866XB'
 
 
 class SerialConn:
@@ -98,7 +98,11 @@ class SerialConn:
 
 # ── 自动扫描找仪器 ────────────────────────────────────────────────
 
-def find_instrument(baudrate: int = 115200, preferred_port: str = None) -> str | None:
+def find_instrument(
+    baudrate: int = 115200,
+    preferred_port: str = None,
+    idn_signature: str | None = None,
+) -> str | None:
     """
     扫描所有 COM 口，发 *IDN? 找 UC2866XB。
     优先检查 preferred_port（上次用的端口）。
@@ -112,6 +116,8 @@ def find_instrument(baudrate: int = 115200, preferred_port: str = None) -> str |
     if preferred_port and preferred_port in ports:
         ports = [preferred_port] + [p for p in ports if p != preferred_port]
 
+    signature = (idn_signature or DEFAULT_IDN_SIGNATURE).encode()
+
     for port in ports:
         try:
             conn = SerialConn(port, baudrate)
@@ -120,7 +126,7 @@ def find_instrument(baudrate: int = 115200, preferred_port: str = None) -> str |
             conn.send('*IDN?')
             resp = conn.recv(timeout=1.5)
             conn.disconnect()
-            if resp and UC2866_IDN.encode() in resp:
+            if resp and signature in resp:
                 return port
         except Exception:
             pass
