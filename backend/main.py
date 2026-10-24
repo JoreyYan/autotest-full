@@ -20,7 +20,7 @@ from .inspection_csv_writer import save as save_inspection
 from .feishu_uploader import get_uploader
 from .finished_code import parse_finished_code
 
-APP_VERSION = '1.7.6'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
+APP_VERSION = '1.7.7'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
 
 app = FastAPI(title='变压器测试系统', version=APP_VERSION)
 
