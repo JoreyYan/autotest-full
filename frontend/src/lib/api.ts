@@ -128,6 +128,7 @@ export interface TestResult {
   failed: number;
   items: MeasuredItem[];
   csv_file: string;
+  hot?: boolean; // 热机测试（NTC 1–50 kΩ），DCR 按 ≤70 mΩ 判
 }
 
 export interface InspectionItemResult {

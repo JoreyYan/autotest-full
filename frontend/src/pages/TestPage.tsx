@@ -884,6 +884,12 @@ export default function TestPage() {
                 <>
                   <div className={`rounded-lg border p-3 text-sm ${overall === "PASS" ? "bg-emerald-50 border-emerald-200" : "bg-rose-50 border-rose-200"}`}>
                     <div className={`font-bold ${fontScale === "xl" ? "text-4xl" : fontScale === "lg" ? "text-2xl" : "text-lg"} ${overall === "PASS" ? "text-emerald-700" : "text-rose-700"}`}>总判定：{overall}</div>
+                    {lastResult.hot && (
+                      <div className="mt-2 inline-flex items-center gap-2 rounded-md border border-orange-300 bg-orange-50 px-2.5 py-1 text-orange-800">
+                        <span className="font-bold">热机测试</span>
+                        <span className="text-xs">NTC 读数 1–50 kΩ，产品还热；DCR 按 ≤70 mΩ 判</span>
+                      </div>
+                    )}
                     <div className="text-xs text-muted-foreground mt-1">规则：任一单元格 Fail，即总结果 Fail。</div>
                   </div>
                   <div className="flex items-center gap-2">

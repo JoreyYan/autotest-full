@@ -29,6 +29,7 @@ class TestRecord:
     serial_code: str = ''    # 扫码枪扫到的产品序列码
     record_number: str = ''  # 飞书序号 / 人工输入序号
     core_number: str = ''    # 磁芯编号（人工输入）
+    hot: bool = False        # 热机测试（NTC 1–50 kΩ），DCR 按 ≤70 mΩ 判，见 apply_hot_rule
 
 
 def parse_csv(csv_text: str) -> list[dict]:
@@ -50,6 +51,46 @@ def parse_csv(csv_text: str) -> list[dict]:
             except (ValueError, IndexError):
                 pass
     return records
+
+
+# 热机测试（业主 2026-10-30 定）：FQC 在拉载刚结束、产品还热的时候复测。
+# NTC（Dcr 7-8，单位 kOhm）读数 1–50 kΩ = 热机；热机时 DCR(mOhm) 各项随温度升高，改按 ≤70 mΩ 判，其余项照常。
+# NTC 低于 1 kΩ 是短路/接触不良，不算热机。ERP 端（SOAI production_sync._hot_overall）是同一条规则。
+HOT_NTC_MIN_KOHM, HOT_NTC_MAX_KOHM = 1.0, 50.0
+HOT_DCR_MAX_MOHM = 70.0
+
+
+def _is_dcr(it: dict) -> bool:
+    return str(it.get("type") or "").strip().lower() == "dcr"
+
+
+def hot_ntc_kohm(items: list[dict]) -> float | None:
+    """NTC（Dcr 7-8，单位 kOhm）的实测值；这台没有这一项或没测到返回 None。"""
+    for it in items:
+        if _is_dcr(it) and str(it.get("pins") or "").strip() == "7-8" and it.get("unit") == "kOhm":
+            v = it.get("value_display")
+            if isinstance(v, (int, float)) and math.isfinite(v):
+                return float(v)
+    return None
+
+
+def apply_hot_rule(items: list[dict]) -> bool:
+    """是热机测试就把 DCR(mOhm) 各项改按 ≤70 mΩ 判（改写 result 和显示用的限值），返回是否热机。
+    缺项占位（值为 NaN）照旧 Fail；其它项不动。"""
+    ntc = hot_ntc_kohm(items)
+    if ntc is None or not (HOT_NTC_MIN_KOHM <= ntc < HOT_NTC_MAX_KOHM):
+        return False
+    for it in items:
+        if not (_is_dcr(it) and it.get("unit") == "mOhm"):
+            continue
+        v = it.get("value_display")
+        if not (isinstance(v, (int, float)) and math.isfinite(v)):
+            continue
+        it["lo_display"] = None
+        it["hi_display"] = HOT_DCR_MAX_MOHM
+        it["result"] = "Pass" if v <= HOT_DCR_MAX_MOHM else "Fail"
+        it["hot_rule"] = True
+    return True
 
 
 def _normalize_unit(unit: str | None) -> str | None:
@@ -421,6 +462,10 @@ class TestRunner:
                 )
 
 
+        hot = apply_hot_rule(items)
+        if hot:
+            self._emit(f"热机测试:NTC {hot_ntc_kohm(items):.1f} kΩ,DCR 按 ≤{HOT_DCR_MAX_MOHM:g} mΩ 判")
+
         # NA(未配置仅展示)不参与判定计数
         passed = sum(1 for i in items if i["result"] == "Pass")
         failed = sum(1 for i in items if i["result"] == "Fail")
@@ -435,7 +480,8 @@ class TestRunner:
             passed=passed,
             failed=failed,
             overall='PASS' if failed == 0 else 'FAIL',
-            csv_raw=csv
+            csv_raw=csv,
+            hot=hot,
         )
 
     # ── 收尾 ─────────────────────────────────────────────────────

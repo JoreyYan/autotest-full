@@ -20,7 +20,7 @@ from .inspection_csv_writer import save as save_inspection
 from .feishu_uploader import get_uploader
 from .finished_code import parse_finished_code
 
-APP_VERSION = '1.7.7'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
+APP_VERSION = '1.7.8'  # 软件版本号（每次发布更新，同步更新 CHANGELOG.md）
 
 app = FastAPI(title='变压器测试系统', version=APP_VERSION)
 
@@ -115,6 +115,7 @@ class TestResult(BaseModel):
     failed: int
     items: list[dict]
     csv_file: str
+    hot: bool = False   # 热机测试（NTC 1–50 kΩ），DCR 已按 ≤70 mΩ 判
 
 
 class InspectionStepResult(BaseModel):
@@ -484,7 +485,8 @@ def run_test(req: RunTestRequest = RunTestRequest()):
         passed=record.passed,
         failed=record.failed,
         items=record.items,
-        csv_file=csv_file
+        csv_file=csv_file,
+        hot=record.hot,
     )
 
 
